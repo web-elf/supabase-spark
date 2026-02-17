@@ -15,6 +15,7 @@ import { StepRoles } from "@/components/wizard/StepRoles";
 import { StepApi } from "@/components/wizard/StepApi";
 import { StepFrontend } from "@/components/wizard/StepFrontend";
 import { JsonEditor } from "@/components/wizard/JsonEditor";
+import { TemplatePicker } from "@/components/wizard/TemplatePicker";
 
 const STEPS = [
   { id: "info", label: "Project Info" },
@@ -34,6 +35,7 @@ const Editor = () => {
   const [jsonMode, setJsonMode] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(!projectId);
+  const [showTemplates, setShowTemplates] = useState(!projectId);
 
   useEffect(() => {
     if (projectId) {
@@ -167,7 +169,16 @@ const Editor = () => {
       </nav>
 
       <div className="container mx-auto px-4 py-6 max-w-5xl">
-        {jsonMode ? (
+        {showTemplates && !projectId ? (
+          <TemplatePicker
+            onSelect={(tplConfig) => {
+              setConfig({ ...tplConfig });
+              setShowTemplates(false);
+              toast.success("Template loaded! Customize anything you need.");
+            }}
+            onSkip={() => setShowTemplates(false)}
+          />
+        ) : jsonMode ? (
           <JsonEditor config={config} onChange={setConfig} />
         ) : (
           <Tabs value={activeStep} onValueChange={setActiveStep}>
