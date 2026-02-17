@@ -104,7 +104,15 @@ const Output = () => {
                     activeFile === f.path ? "bg-primary/10 text-primary" : "hover:bg-muted text-muted-foreground"
                   }`}
                 >
-                  {f.path.split("/").pop()}
+                  {(() => {
+                    const basename = f.path.split("/").pop() || f.path;
+                    const hasDuplicate = categoryFiles.filter(cf => cf.path.split("/").pop() === basename).length > 1;
+                    if (hasDuplicate) {
+                      const parts = f.path.split("/");
+                      return parts.length > 1 ? `${parts[parts.length - 2]}/${basename}` : basename;
+                    }
+                    return basename;
+                  })()}
                 </button>
               ))}
             </div>
