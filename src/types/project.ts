@@ -71,6 +71,12 @@ export interface ProjectFeatures {
   notifications: boolean;
   fileUploads: boolean;
   searchPagination: boolean;
+  rateLimiting: boolean;
+  multiTenancy: boolean;
+  apiIntegrations: boolean;
+  logging: boolean;
+  featureFlags: boolean;
+  backgroundJobs: boolean;
 }
 
 export interface FrontendOptions {
@@ -99,6 +105,12 @@ export const DEFAULT_FEATURES: ProjectFeatures = {
   notifications: false,
   fileUploads: false,
   searchPagination: true,
+  rateLimiting: false,
+  multiTenancy: false,
+  apiIntegrations: false,
+  logging: false,
+  featureFlags: false,
+  backgroundJobs: false,
 };
 
 export const DEFAULT_FRONTEND: FrontendOptions = {

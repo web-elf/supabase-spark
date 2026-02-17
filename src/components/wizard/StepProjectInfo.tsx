@@ -13,6 +13,12 @@ const FEATURE_LABELS: { key: keyof ProjectFeatures; label: string; desc: string 
   { key: "notifications", label: "Notifications", desc: "Trigger-based notification system" },
   { key: "fileUploads", label: "File Uploads", desc: "Storage bucket setup with RLS" },
   { key: "searchPagination", label: "Search & Pagination", desc: "Built-in search and pagination helpers" },
+  { key: "rateLimiting", label: "Rate Limiting", desc: "Per-endpoint rate limits with IP & user tracking" },
+  { key: "multiTenancy", label: "Multi-Tenancy", desc: "Organization-based tenant isolation via RLS" },
+  { key: "apiIntegrations", label: "API Integrations", desc: "HTTP client, retry logic & webhook templates" },
+  { key: "logging", label: "Centralized Logging", desc: "Activity logs, error logs & API metrics" },
+  { key: "featureFlags", label: "Feature Flags", desc: "Toggleable feature flags with admin management" },
+  { key: "backgroundJobs", label: "Background Jobs", desc: "Job queue with status tracking & retry logic" },
 ];
 
 interface Props {
