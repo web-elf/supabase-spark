@@ -23,6 +23,9 @@ const Index = () => {
             <span className="text-lg font-bold font-mono">supabase.factory</span>
           </div>
           <div className="flex items-center gap-3">
+            <Link to="/editor">
+              <Button variant="ghost" size="sm">Editor</Button>
+            </Link>
             <Link to="/auth">
               <Button variant="ghost" size="sm">Sign In</Button>
             </Link>
