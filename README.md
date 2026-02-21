@@ -7,6 +7,7 @@
 Design your schema, roles, and features in a wizard UI — export production-ready SQL migrations, Edge Functions, and a React frontend skeleton as a downloadable ZIP.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/Website-supabase--spark.vercel.app-3ecf8e?style=flat&logo=supabase)](https://supabase-spark.vercel.app)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)](https://www.typescriptlang.org/)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Supabase](https://img.shields.io/badge/Supabase-Backend-3ecf8e.svg)](https://supabase.com/)
