@@ -9,11 +9,11 @@
   "keywords": ["supabase", "postgres", "code-generator", "schema-builder", "rls", "edge-functions", "react", "developer-tools"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/supabase-factory.git"
+    "url": "https://github.com/web-elf/supabase-spark.git"
   },
-  "homepage": "https://github.com/YOUR_USERNAME/supabase-factory#readme",
+  "homepage": "https://github.com/web-elf/supabase-spark#readme",
   "bugs": {
-    "url": "https://github.com/YOUR_USERNAME/supabase-factory/issues"
+    "url": "https://github.com/web-elf/supabase-spark/issues"
   },
   "engines": {
     "node": ">=18"
