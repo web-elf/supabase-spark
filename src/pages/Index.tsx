@@ -20,14 +20,14 @@ const Index = () => {
         <div className="container mx-auto flex items-center justify-between h-16 px-4">
           <div className="flex items-center gap-2">
             <Terminal className="h-6 w-6 text-primary" />
-            <span className="text-lg font-bold font-mono">supabase.factory</span>
+            <span className="text-lg font-bold font-mono text-foreground">supabase.factory</span>
           </div>
           <div className="flex items-center gap-3">
             <Link to="/editor">
-              <Button variant="ghost" size="sm">Editor</Button>
+              <Button variant="ghost" size="sm" className="text-foreground/80 hover:text-foreground">Editor</Button>
             </Link>
             <Link to="/auth">
-              <Button variant="ghost" size="sm">Sign In</Button>
+              <Button variant="ghost" size="sm" className="text-foreground/80 hover:text-foreground">Sign In</Button>
             </Link>
             <Link to="/auth?mode=signup">
               <Button size="sm" className="gap-1">
@@ -50,7 +50,7 @@ const Index = () => {
             <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse-glow" />
             production-ready backend generator
           </div>
-          <h1 className="text-5xl md:text-7xl font-black tracking-tight mb-6 leading-[1.1]">
+          <h1 className="text-5xl md:text-7xl font-black tracking-tight mb-6 leading-[1.1] text-foreground">
             Ship your <span className="gradient-text">Supabase backend</span> in minutes
           </h1>
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10">
@@ -63,7 +63,7 @@ const Index = () => {
               </Button>
             </Link>
             <Link to="/editor">
-              <Button size="lg" variant="outline" className="text-base px-8 gap-2">
+              <Button size="lg" variant="outline" className="text-base px-8 gap-2 text-foreground border-foreground/20 hover:bg-foreground/10">
                 <Terminal className="h-4 w-4" /> Try Without Account
               </Button>
             </Link>
@@ -104,7 +104,7 @@ CREATE POLICY "Users view own orders"
 
       {/* Features */}
       <section className="container mx-auto px-4 py-20">
-        <h2 className="text-3xl font-bold text-center mb-12">Everything you need, nothing you don't</h2>
+        <h2 className="text-3xl font-bold text-center mb-12 text-foreground">Everything you need, nothing you don't</h2>
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-5xl mx-auto">
           {features.map((f, i) => (
             <motion.div
@@ -115,7 +115,7 @@ CREATE POLICY "Users view own orders"
               className="rounded-lg border border-border bg-card p-6 hover:border-primary/40 transition-colors"
             >
               <f.icon className="h-8 w-8 text-primary mb-3" />
-              <h3 className="font-semibold text-lg mb-1">{f.title}</h3>
+              <h3 className="font-semibold text-lg mb-1 text-foreground">{f.title}</h3>
               <p className="text-sm text-muted-foreground">{f.desc}</p>
             </motion.div>
           ))}
@@ -125,7 +125,7 @@ CREATE POLICY "Users view own orders"
       {/* CTA */}
       <section className="container mx-auto px-4 py-20">
         <div className="max-w-2xl mx-auto text-center rounded-xl border border-primary/20 bg-primary/5 p-12">
-          <h2 className="text-3xl font-bold mb-4">Ready to build?</h2>
+          <h2 className="text-3xl font-bold mb-4 text-foreground">Ready to build?</h2>
           <p className="text-muted-foreground mb-8">
             Stop writing boilerplate. Start shipping products.
           </p>
@@ -140,7 +140,7 @@ CREATE POLICY "Users view own orders"
       {/* Footer */}
       <footer className="border-t border-border py-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <span className="font-mono">supabase.factory</span> — built with Lovable
+          <span className="font-mono text-foreground/60">supabase.factory</span> — built with Lovable
         </div>
       </footer>
     </div>
