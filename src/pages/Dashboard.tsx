@@ -85,9 +85,16 @@ const Dashboard = () => {
             <Terminal className="h-5 w-5 text-primary" />
             <span className="font-bold font-mono">supabase.factory</span>
           </Link>
-          <Button variant="ghost" size="sm" onClick={() => signOut().then(() => navigate("/"))}>
-            <LogOut className="h-4 w-4 mr-1" /> Sign Out
-          </Button>
+          <div className="flex items-center gap-2">
+            <Link to="/editor">
+              <Button variant="ghost" size="sm">
+                <Terminal className="h-4 w-4 mr-1" /> Editor
+              </Button>
+            </Link>
+            <Button variant="ghost" size="sm" onClick={() => signOut().then(() => navigate("/"))}>
+              <LogOut className="h-4 w-4 mr-1" /> Sign Out
+            </Button>
+          </div>
         </div>
       </nav>
 
