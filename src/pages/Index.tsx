@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
-import { Database, Shield, Zap, Code, ArrowRight, Terminal, Layers, Lock } from "lucide-react";
+import { Database, Shield, Zap, Code, ArrowRight, Terminal, Layers, Lock, Github, Star } from "lucide-react";
 
 const features = [
   { icon: Database, title: "Schema Generator", desc: "Tables, columns, indexes, and foreign keys from a visual builder" },
@@ -23,6 +23,12 @@ const Index = () => {
             <span className="text-lg font-bold font-mono text-foreground">supabase.factory</span>
           </div>
           <div className="flex items-center gap-3">
+            <a href="https://github.com/web-elf/supabase-spark" target="_blank" rel="noopener noreferrer">
+              <Button variant="outline" size="sm" className="gap-2">
+                <Github className="h-4 w-4" />
+                <span className="hidden sm:inline">Star on GitHub</span>
+              </Button>
+            </a>
             <Link to="/editor">
               <Button variant="ghost" size="sm" className="text-foreground/80 hover:text-foreground">Editor</Button>
             </Link>
@@ -140,7 +146,21 @@ CREATE POLICY "Users view own orders"
       {/* Footer */}
       <footer className="border-t border-border py-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <span className="font-mono text-foreground/60">supabase.factory</span> — open source Supabase project generator
+          <div className="flex flex-col items-center gap-3">
+            <div>
+              <span className="font-mono text-foreground/60">supabase.factory</span> — open source Supabase project generator
+            </div>
+            <a
+              href="https://github.com/web-elf/supabase-spark"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 text-foreground/80 hover:text-foreground transition-colors"
+            >
+              <Github className="h-4 w-4" />
+              <span>Contribute on GitHub</span>
+              <Star className="h-3 w-3" />
+            </a>
+          </div>
         </div>
       </footer>
     </div>
