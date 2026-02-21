@@ -1,8 +1,23 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "supabase-factory",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "description": "A visual project generator for Supabase backends — schema, roles, RLS, Edge Functions & frontend in a downloadable ZIP.",
+  "author": "Supabase Factory Contributors",
+  "license": "GPL-3.0",
+  "keywords": ["supabase", "postgres", "code-generator", "schema-builder", "rls", "edge-functions", "react", "developer-tools"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/supabase-factory.git"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/supabase-factory#readme",
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/supabase-factory/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -8,6 +8,16 @@ export interface GeneratedFile {
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
+// Helper: Get the admin role name (first role that contains 'admin' or 'owner', or the first role)
+function getAdminRoleName(config: ProjectConfig): string | null {
+  if (config.roles.length === 0) return null;
+  const adminRole = config.roles.find(r => 
+    r.name.toLowerCase().includes('admin') || 
+    r.name.toLowerCase().includes('owner')
+  );
+  return adminRole ? adminRole.name : config.roles[0].name;
+}
+
 export function generateProject(config: ProjectConfig): GeneratedFile[] {
   const files: GeneratedFile[] = [];
 
@@ -107,6 +117,10 @@ function generateCoreSchema(config: ProjectConfig): string {
       if (col.isRequired && !col.isPrimary) def += " NOT NULL";
       if (col.isUnique && !col.isPrimary) def += " UNIQUE";
       if (col.defaultValue) def += ` DEFAULT ${col.defaultValue}`;
+      // Handle foreign key references
+      if (col.references) {
+        def += ` REFERENCES ${col.references.table}(${col.references.column}) ON DELETE CASCADE`;
+      }
       colDefs.push(def);
     }
 
@@ -126,7 +140,10 @@ function generateCoreSchema(config: ProjectConfig): string {
     }
 
     if (config.features.multiTenancy) {
-      colDefs.push("  organization_id UUID -- tenant isolation column");
+      // Check if organization_id already exists as a column
+      if (!table.columns.some((c) => c.name === "organization_id")) {
+        colDefs.push("  organization_id UUID NOT NULL");
+      }
     }
 
     lines.push(colDefs.join(",\n"));
@@ -149,9 +166,16 @@ function generateCoreSchema(config: ProjectConfig): string {
   // Foreign keys for 1:1 and 1:N relationships
   for (const rel of config.relationships) {
     if (rel.type === "1:1" || rel.type === "1:N") {
-      lines.push(
-        `ALTER TABLE public.${rel.to.table} ADD COLUMN ${rel.from.table}_id UUID REFERENCES public.${rel.from.table}(id) ON DELETE CASCADE;`
-      );
+      // Check if the foreign key column already exists in the table definition
+      const toTable = config.tables.find(t => t.name === rel.to.table);
+      const fkColumnName = `${rel.from.table}_id`;
+      const columnExists = toTable?.columns.some(c => c.name === fkColumnName || c.name === rel.to.column);
+      
+      if (!columnExists) {
+        lines.push(
+          `ALTER TABLE public.${rel.to.table} ADD COLUMN ${fkColumnName} UUID REFERENCES public.${rel.from.table}(id) ON DELETE CASCADE;`
+        );
+      }
     } else if (rel.type === "N:N") {
       const jt = `${rel.from.table}_${rel.to.table}`;
       lines.push(`-- Junction table for N:N relationship`);
@@ -219,6 +243,15 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   )
 $$;
 
+${config.features.multiTenancy ? `
+-- Helper: Check if the current user is a member of the given org (stub for multi-tenancy)
+-- Full implementation is in the multi-tenancy migration
+CREATE OR REPLACE FUNCTION public.is_tenant_member(_org_id UUID)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT false -- Will be replaced by multi-tenancy migration
+$$;
+` : ''}
+
 -- Users can read their own roles
 CREATE POLICY "Users can view own roles"
   ON public.user_roles FOR SELECT
@@ -229,7 +262,7 @@ CREATE POLICY "Users can view own roles"
 CREATE POLICY "Admins can manage roles"
   ON public.user_roles FOR ALL
   TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${config.roles[0]?.name || 'admin'}'));
 `;
 }
 
@@ -290,6 +323,7 @@ function generateRLS(config: ProjectConfig): string {
 // ─── Module: Audit Logs ──────────────────────────────────────────────────────
 
 function generateAuditLogModule(config: ProjectConfig): GeneratedFile[] {
+  const adminRole = getAdminRoleName(config);
   let sql = `-- ============================================================
 -- Module: Audit Logging
 -- Tracks all INSERT/UPDATE/DELETE operations on user tables.
@@ -312,9 +346,9 @@ ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 CREATE INDEX idx_audit_logs_created_at ON public.audit_logs(created_at);
 CREATE INDEX idx_audit_logs_table_name ON public.audit_logs(table_name);
 
-CREATE POLICY "Admins can view audit logs"
+${adminRole ? `CREATE POLICY "Admins can view audit logs"
   ON public.audit_logs FOR SELECT TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, audit logs are service-role only'}
 
 CREATE OR REPLACE FUNCTION public.audit_trigger_fn()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -391,7 +425,8 @@ CREATE POLICY "Users can delete own files"
 
 // ─── Module: Rate Limiting ───────────────────────────────────────────────────
 
-function generateRateLimitingModule(_config: ProjectConfig): GeneratedFile[] {
+function generateRateLimitingModule(config: ProjectConfig): GeneratedFile[] {
+  const adminRole = getAdminRoleName(config);
   const sql = `-- ============================================================
 -- Module: Rate Limiting
 -- SECURITY: Admin-only management of rate limit rules.
@@ -411,9 +446,9 @@ CREATE TABLE public.api_rate_limits (
 ALTER TABLE public.api_rate_limits ENABLE ROW LEVEL SECURITY;
 
 -- SECURITY: Only admins can configure rate limits
-CREATE POLICY "Admins can manage rate limits"
+${adminRole ? `CREATE POLICY "Admins can manage rate limits"
   ON public.api_rate_limits FOR ALL TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, rate limits are service-role only'}
 
 CREATE POLICY "Authenticated can read rate limits"
   ON public.api_rate_limits FOR SELECT TO authenticated
@@ -438,9 +473,9 @@ CREATE POLICY "Users can view own request logs"
   ON public.request_logs FOR SELECT TO authenticated
   USING (auth.uid() = user_id);
 
-CREATE POLICY "Admins can view all request logs"
+${adminRole ? `CREATE POLICY "Admins can view all request logs"
   ON public.request_logs FOR ALL TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : ''}
 
 -- Service role inserts request logs (from edge function)
 CREATE POLICY "Service can insert request logs"
@@ -588,6 +623,7 @@ CREATE TABLE public.organization_members (
 ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
 
 -- Helper: Check if the current user is a member of the given org
+-- This replaces the stub created in the roles migration
 CREATE OR REPLACE FUNCTION public.is_tenant_member(_org_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (
@@ -635,8 +671,15 @@ CREATE POLICY "Org admins can manage members"
   // Add foreign key from user tables to organizations
   for (const table of config.tables) {
     if (!table.name) continue;
-    sql += `\n-- Tenant FK for ${table.name}`;
-    sql += `\nALTER TABLE public.${table.name} ADD CONSTRAINT fk_${table.name}_org FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;`;
+    // Check if the table already has organization_id defined with a reference
+    const orgColumn = table.columns.find(c => c.name === "organization_id");
+    const hasOrgReference = orgColumn?.references?.table === "organizations";
+    
+    if (!hasOrgReference && config.features.multiTenancy) {
+      sql += `\n-- Tenant FK for ${table.name}`;
+      sql += `\nALTER TABLE public.${table.name} ADD CONSTRAINT fk_${table.name}_org FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;`;
+      sql += `\nCREATE INDEX idx_${table.name}_org ON public.${table.name}(organization_id);`;
+    }
   }
 
   return [{ path: "migrations/multi_tenancy.sql", content: sql, category: "sql" }];
@@ -644,7 +687,8 @@ CREATE POLICY "Org admins can manage members"
 
 // ─── Module: Centralized Logging ─────────────────────────────────────────────
 
-function generateLoggingModule(_config: ProjectConfig): GeneratedFile[] {
+function generateLoggingModule(config: ProjectConfig): GeneratedFile[] {
+  const adminRole = getAdminRoleName(config);
   const sql = `-- ============================================================
 -- Module: Centralized Logging & Analytics
 -- SECURITY: Error logs and API metrics are admin-only.
@@ -669,9 +713,9 @@ CREATE POLICY "Users can view own activity"
   ON public.activity_logs FOR SELECT TO authenticated
   USING (auth.uid() = user_id);
 
-CREATE POLICY "Admins can view all activity"
+${adminRole ? `CREATE POLICY "Admins can view all activity"
   ON public.activity_logs FOR SELECT TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : ''}
 
 CREATE POLICY "Service can insert activity"
   ON public.activity_logs FOR INSERT TO service_role
@@ -692,9 +736,9 @@ CREATE INDEX idx_error_logs_created_at ON public.error_logs(created_at);
 CREATE INDEX idx_error_logs_severity ON public.error_logs(severity);
 
 -- SECURITY: Only admins can view error logs
-CREATE POLICY "Admins can view error logs"
+${adminRole ? `CREATE POLICY "Admins can view error logs"
   ON public.error_logs FOR SELECT TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, error logs are service-role only'}
 
 CREATE POLICY "Service can insert error logs"
   ON public.error_logs FOR INSERT TO service_role
@@ -715,9 +759,9 @@ CREATE INDEX idx_api_metrics_created_at ON public.api_metrics(created_at);
 CREATE INDEX idx_api_metrics_endpoint ON public.api_metrics(endpoint);
 
 -- SECURITY: Only admins can view API metrics
-CREATE POLICY "Admins can view api metrics"
+${adminRole ? `CREATE POLICY "Admins can view api metrics"
   ON public.api_metrics FOR SELECT TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, API metrics are service-role only'}
 
 CREATE POLICY "Service can insert api metrics"
   ON public.api_metrics FOR INSERT TO service_role
@@ -804,7 +848,8 @@ serve(async (req) => {
 
 // ─── Module: Feature Flags ───────────────────────────────────────────────────
 
-function generateFeatureFlagsModule(_config: ProjectConfig): GeneratedFile[] {
+function generateFeatureFlagsModule(config: ProjectConfig): GeneratedFile[] {
+  const adminRole = getAdminRoleName(config);
   const sql = `-- ============================================================
 -- Module: Feature Flags
 -- SECURITY: Only admins can create/update/delete flags.
@@ -829,18 +874,18 @@ CREATE POLICY "Authenticated can read flags"
   ON public.feature_flags FOR SELECT TO authenticated
   USING (true);
 
--- Only admins can manage feature flags
+${adminRole ? `-- Only admins can manage feature flags
 CREATE POLICY "Admins can insert flags"
   ON public.feature_flags FOR INSERT TO authenticated
-  WITH CHECK (public.has_role(auth.uid(), 'admin'));
+  WITH CHECK (public.has_role(auth.uid(), '${adminRole}'));
 
 CREATE POLICY "Admins can update flags"
   ON public.feature_flags FOR UPDATE TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));
 
 CREATE POLICY "Admins can delete flags"
   ON public.feature_flags FOR DELETE TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, feature flags are service-role only for management'}
 
 -- Helper function to check if a feature is enabled
 CREATE OR REPLACE FUNCTION public.is_feature_enabled(_flag_key TEXT)
@@ -862,7 +907,8 @@ CREATE TRIGGER update_feature_flags_updated_at
 
 // ─── Module: Background Jobs ─────────────────────────────────────────────────
 
-function generateBackgroundJobsModule(_config: ProjectConfig): GeneratedFile[] {
+function generateBackgroundJobsModule(config: ProjectConfig): GeneratedFile[] {
+  const adminRole = getAdminRoleName(config);
   const sql = `-- ============================================================
 -- Module: Background Jobs
 -- SECURITY: Admins can manage all jobs.
@@ -896,10 +942,10 @@ CREATE POLICY "Users can view own jobs"
   ON public.jobs FOR SELECT TO authenticated
   USING (auth.uid() = created_by);
 
--- Admins can manage all jobs
+${adminRole ? `-- Admins can manage all jobs
 CREATE POLICY "Admins can manage all jobs"
   ON public.jobs FOR ALL TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));` : ''}
 
 -- Service role can manage jobs (for worker functions)
 CREATE POLICY "Service can manage jobs"
