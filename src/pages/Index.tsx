@@ -26,7 +26,7 @@ const Index = () => {
             <a href="https://github.com/web-elf/supabase-spark" target="_blank" rel="noopener noreferrer">
               <Button variant="outline" size="sm" className="gap-2 text-foreground hover:text-foreground">
                 <Github className="h-4 w-4" />
-                <span className="hidden sm:inline">Star on GitHub</span>
+                <span className="hidden sm:inline">Star it on GitHub</span>
               </Button>
             </a>
             <Link to="/editor">
