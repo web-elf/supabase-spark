@@ -666,6 +666,27 @@ CREATE POLICY "Org admins can manage members"
         AND om.role = 'admin'
     )
   );
+
+-- Auto-create a "Home Organization" for every new user on signup
+CREATE OR REPLACE FUNCTION public.handle_new_user_org()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  new_org_id UUID;
+BEGIN
+  INSERT INTO public.organizations (name, slug, owner_id)
+  VALUES ('My Organization', 'org-' || LEFT(NEW.id::TEXT, 8), NEW.id)
+  RETURNING id INTO new_org_id;
+
+  INSERT INTO public.organization_members (user_id, organization_id, role)
+  VALUES (NEW.id, new_org_id, 'admin');
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_auth_user_created_org
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user_org();
 `;
 
   // Add foreign key from user tables to organizations
@@ -1414,11 +1435,207 @@ serve(async (req) => {
 `;
 }
 
-// ─── Frontend Files (unchanged) ──────────────────────────────────────────────
+// ─── Frontend Files (complete runnable Vite + React project) ─────────────────
 
 function generateFrontendFiles(config: ProjectConfig): GeneratedFile[] {
   const files: GeneratedFile[] = [];
+  const hasMT = config.features.multiTenancy;
 
+  // ── package.json ───────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/package.json",
+    content: JSON.stringify({
+      name: config.projectName || "generated-app",
+      private: true,
+      version: "0.0.1",
+      type: "module",
+      scripts: {
+        dev: "vite",
+        build: "tsc -b && vite build",
+        preview: "vite preview",
+      },
+      dependencies: {
+        react: "^18.3.1",
+        "react-dom": "^18.3.1",
+        "react-router-dom": "^6.30.0",
+        "@supabase/supabase-js": "^2.49.0",
+        "lucide-react": "^0.462.0",
+      },
+      devDependencies: {
+        "@types/react": "^18.3.18",
+        "@types/react-dom": "^18.3.5",
+        "@vitejs/plugin-react": "^4.3.4",
+        typescript: "~5.6.2",
+        vite: "^6.0.5",
+        tailwindcss: "^4.0.0",
+        "@tailwindcss/vite": "^4.0.0",
+      },
+    }, null, 2),
+    category: "frontend",
+  });
+
+  // ── index.html ─────────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/index.html",
+    content: `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${config.projectName || "App"}</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>`,
+    category: "frontend",
+  });
+
+  // ── src/main.tsx ───────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/main.tsx",
+    content: `import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);`,
+    category: "frontend",
+  });
+
+  // ── src/index.css (Tailwind v4) ────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/index.css",
+    content: `@import "tailwindcss";`,
+    category: "frontend",
+  });
+
+  // ── src/lib/supabase.ts ────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/lib/supabase.ts",
+    content: `import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error(
+    'Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY. ' +
+    'Copy .env.example to .env and fill in your Supabase credentials.'
+  );
+}
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);`,
+    category: "frontend",
+  });
+
+  // ── vite.config.ts ─────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/vite.config.ts",
+    content: `import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+import path from 'path';
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+});`,
+    category: "frontend",
+  });
+
+  // ── tsconfig.json ──────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/tsconfig.json",
+    content: JSON.stringify({
+      files: [],
+      references: [{ path: "./tsconfig.app.json" }],
+      compilerOptions: {
+        baseUrl: ".",
+        paths: { "@/*": ["./src/*"] },
+      },
+    }, null, 2),
+    category: "frontend",
+  });
+
+  // ── tsconfig.app.json ─────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/tsconfig.app.json",
+    content: JSON.stringify({
+      compilerOptions: {
+        target: "ES2020",
+        useDefineForClassFields: true,
+        lib: ["ES2020", "DOM", "DOM.Iterable"],
+        module: "ESNext",
+        skipLibCheck: true,
+        moduleResolution: "bundler",
+        allowImportingTsExtensions: true,
+        isolatedModules: true,
+        moduleDetection: "force",
+        noEmit: true,
+        jsx: "react-jsx",
+        strict: false,
+        noUnusedLocals: false,
+        noUnusedParameters: false,
+        baseUrl: ".",
+        paths: { "@/*": ["./src/*"] },
+      },
+      include: ["src"],
+    }, null, 2),
+    category: "frontend",
+  });
+
+  // ── .env.example ───────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/.env.example",
+    content: `# Copy this file to .env and fill in your Supabase credentials.
+# You can find these in your Supabase dashboard under Settings > API.
+
+VITE_SUPABASE_URL=https://your-project-id.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key-here`,
+    category: "frontend",
+  });
+
+  // ── useOrganization hook (multi-tenancy only) ──────────────────────────────
+  if (hasMT) {
+    files.push({
+      path: "frontend/src/hooks/useOrganization.ts",
+      content: `import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+
+let cachedOrgId: string | null = null;
+
+export function useOrganization() {
+  const [orgId, setOrgId] = useState<string | null>(cachedOrgId);
+  const [loading, setLoading] = useState(!cachedOrgId);
+
+  useEffect(() => {
+    if (cachedOrgId) return;
+    supabase.rpc('current_organization').then(({ data, error }) => {
+      if (!error && data) {
+        cachedOrgId = data;
+        setOrgId(data);
+      }
+      setLoading(false);
+    });
+  }, []);
+
+  return { orgId, loading };
+}`,
+      category: "frontend",
+    });
+  }
+
+  // ── App.tsx ────────────────────────────────────────────────────────────────
   files.push({
     path: "frontend/src/App.tsx",
     content: `import { BrowserRouter, Routes, Route } from 'react-router-dom';
@@ -1430,7 +1647,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div>Home</div>"}} />
+        <Route path="/" element={${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div className=\"p-8\"><h1 className=\"text-2xl font-bold\">Home</h1></div>"}} />
 ${config.frontendOptions.loginSignup ? '        <Route path="/login" element={<Login />} />\n        <Route path="/signup" element={<Signup />} />' : ""}
 ${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route path="/${t.name}" element={<${capitalize(t.name)}List />} />`).join("\n") : ""}
       </Routes>
@@ -1440,30 +1657,75 @@ ${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route pa
     category: "frontend",
   });
 
+  // ── Login.tsx ──────────────────────────────────────────────────────────────
   if (config.frontendOptions.loginSignup) {
     files.push({
       path: "frontend/src/pages/Login.tsx",
       content: `import { useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { Link } from 'react-router-dom';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
     const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) alert(error.message);
+    if (error) setError(error.message);
     else window.location.href = '/';
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <form onSubmit={handleLogin} className="w-full max-w-md space-y-4 p-8">
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <form onSubmit={handleLogin} className="w-full max-w-md space-y-4 p-8 bg-white rounded-lg shadow">
         <h1 className="text-2xl font-bold">Sign In</h1>
+        {error && <p className="text-red-600 text-sm">{error}</p>}
         <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" className="w-full border p-2 rounded" required />
         <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className="w-full border p-2 rounded" required />
-        <button type="submit" className="w-full bg-primary text-white p-2 rounded">Sign In</button>
+        <button type="submit" className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700">Sign In</button>
+        <p className="text-sm text-center text-gray-600">Don't have an account? <Link to="/signup" className="text-blue-600 hover:underline">Sign Up</Link></p>
+      </form>
+    </div>
+  );
+}`,
+      category: "frontend",
+    });
+
+    // ── Signup.tsx ──────────────────────────────────────────────────────────
+    files.push({
+      path: "frontend/src/pages/Signup.tsx",
+      content: `import { useState } from 'react';
+import { supabase } from '../lib/supabase';
+import { Link } from 'react-router-dom';
+
+export default function Signup() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setMessage('');
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) setError(error.message);
+    else setMessage('Check your email for a confirmation link.');
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <form onSubmit={handleSignup} className="w-full max-w-md space-y-4 p-8 bg-white rounded-lg shadow">
+        <h1 className="text-2xl font-bold">Sign Up</h1>
+        {error && <p className="text-red-600 text-sm">{error}</p>}
+        {message && <p className="text-green-600 text-sm">{message}</p>}
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" className="w-full border p-2 rounded" required />
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password (min 6 chars)" className="w-full border p-2 rounded" minLength={6} required />
+        <button type="submit" className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700">Create Account</button>
+        <p className="text-sm text-center text-gray-600">Already have an account? <Link to="/login" className="text-blue-600 hover:underline">Sign In</Link></p>
       </form>
     </div>
   );
@@ -1472,30 +1734,110 @@ export default function Login() {
     });
   }
 
+  // ── Dashboard.tsx ──────────────────────────────────────────────────────────
+  if (config.frontendOptions.roleDashboards) {
+    const navLinks = config.tables.map(t => `          <a href="/${t.name}" className="text-blue-600 hover:underline">${capitalize(t.name)}</a>`).join("\n");
+    files.push({
+      path: "frontend/src/pages/Dashboard.tsx",
+      content: `import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
+
+export default function Dashboard() {
+  const [user, setUser] = useState<any>(null);
+${hasMT ? "  const { orgId, loading: orgLoading } = useOrganization();" : ""}
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUser(data.user));
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <nav className="bg-white shadow p-4 flex items-center justify-between">
+        <h1 className="text-xl font-bold">${config.projectName || "Dashboard"}</h1>
+        <div className="flex items-center gap-4">
+          <span className="text-sm text-gray-600">{user?.email}</span>
+          <button onClick={() => supabase.auth.signOut().then(() => window.location.href = '/login')} className="text-sm text-red-600 hover:underline">Sign Out</button>
+        </div>
+      </nav>
+      <main className="p-8">
+${hasMT ? `        {orgLoading ? <p>Loading…</p> : <p className="text-sm text-gray-500 mb-4">Organization: {orgId ?? 'None'}</p>}` : ""}
+        <h2 className="text-lg font-semibold mb-4">Quick Links</h2>
+        <div className="flex flex-wrap gap-4">
+${navLinks}
+        </div>
+      </main>
+    </div>
+  );
+}`,
+      category: "frontend",
+    });
+  }
+
+  // ── CRUD List pages ────────────────────────────────────────────────────────
   if (config.frontendOptions.crudPages) {
     for (const table of config.tables) {
       if (!table.name) continue;
+      const cols = table.columns.filter(c => !["id", "created_at", "updated_at", "deleted_at", "user_id", "organization_id"].includes(c.name));
+      const orgFilter = hasMT ? `\n    if (orgId) query = query.eq('organization_id', orgId);` : "";
+      const orgInsert = hasMT ? `, organization_id: orgId` : "";
+
       files.push({
         path: `frontend/src/pages/${capitalize(table.name)}List.tsx`,
         content: `import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
 
 export default function ${capitalize(table.name)}List() {
   const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+${hasMT ? "  const { orgId } = useOrganization();" : ""}
 
-  useEffect(() => {
-    supabase.from('${table.name}').select('*').then(({ data }) => setItems(data || []));
-  }, []);
+  const fetchItems = async () => {
+    setLoading(true);
+    let query = supabase.from('${table.name}').select('*');${orgFilter}
+    const { data } = await query.order('created_at', { ascending: false });
+    setItems(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchItems(); }, [${hasMT ? "orgId" : ""}]);
+
+  const handleDelete = async (id: string) => {
+    await supabase.from('${table.name}').delete().eq('id', id);
+    fetchItems();
+  };
+
+  if (loading) return <div className="p-8">Loading…</div>;
 
   return (
     <div className="p-8">
-      <h1 className="text-2xl font-bold mb-4">${capitalize(table.name)}</h1>
-      <div className="space-y-2">
-        {items.map((item) => (
-          <div key={item.id} className="border p-4 rounded">
-            <pre className="text-sm">{JSON.stringify(item, null, 2)}</pre>
-          </div>
-        ))}
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">${capitalize(table.name)}</h1>
+        <a href="/" className="text-sm text-blue-600 hover:underline">← Back</a>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse bg-white shadow rounded">
+          <thead>
+            <tr className="bg-gray-100">
+${cols.map(c => `              <th className="text-left p-3 text-sm font-medium text-gray-600">${c.name}</th>`).join("\n")}
+              <th className="text-right p-3 text-sm font-medium text-gray-600">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id} className="border-t">
+${cols.map(c => `                <td className="p-3 text-sm">{String(item.${c.name} ?? '')}</td>`).join("\n")}
+                <td className="p-3 text-sm text-right">
+                  <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:underline text-xs">Delete</button>
+                </td>
+              </tr>
+            ))}
+            {items.length === 0 && (
+              <tr><td colSpan={${cols.length + 1}} className="p-8 text-center text-gray-400">No records found</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
