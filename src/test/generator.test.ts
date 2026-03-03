@@ -483,7 +483,10 @@ describe("generateProject — multi-tenancy module", () => {
 
     // The column definition itself should appear exactly once in the CREATE TABLE block
     // (comments, indexes, etc. may also mention it — we only care about column definitions)
-    const columnDefMatches = core.content.match(/^\s+organization_id UUID/gm);
+    // In the items CREATE TABLE block, organization_id should appear once as a column def
+    // (the organizations table itself also has references to UUID, so we scope to the items table section)
+    const itemsSection = core.content.split(/-- ── Table: items/)[1]?.split(/-- ── /)[0] || '';
+    const columnDefMatches = itemsSection.match(/organization_id UUID/gm);
     expect(columnDefMatches?.length).toBe(1);
   });
 
