@@ -442,13 +442,12 @@ describe("generateProject — roles and RLS", () => {
 // ─── Multi-Tenancy Module ────────────────────────────────────────────────────
 
 describe("generateProject — multi-tenancy module", () => {
-  it("generates organizations and organization_members tables", () => {
+  it("generates organizations and organization_members tables in core schema", () => {
     const config = makeConfig({ features: { ...DEFAULT_FEATURES, multiTenancy: true } });
     const files = generateProject(config);
-    const mt = files.find((f) => f.path.includes("multi_tenancy"));
-    expect(mt).toBeDefined();
-    expect(mt!.content).toContain("CREATE TABLE public.organizations");
-    expect(mt!.content).toContain("CREATE TABLE public.organization_members");
+    const core = findFile(files, "001_core.sql")!;
+    expect(core.content).toContain("CREATE TABLE public.organizations");
+    expect(core.content).toContain("CREATE TABLE public.organization_members");
   });
 
   it("creates is_tenant_member() function", () => {
@@ -484,7 +483,10 @@ describe("generateProject — multi-tenancy module", () => {
 
     // The column definition itself should appear exactly once in the CREATE TABLE block
     // (comments, indexes, etc. may also mention it — we only care about column definitions)
-    const columnDefMatches = core.content.match(/^\s+organization_id UUID/gm);
+    // In the items CREATE TABLE block, organization_id should appear once as a column def
+    // (the organizations table itself also has references to UUID, so we scope to the items table section)
+    const itemsSection = core.content.split(/-- ── Table: items/)[1]?.split(/-- ── /)[0] || '';
+    const columnDefMatches = itemsSection.match(/organization_id UUID/gm);
     expect(columnDefMatches?.length).toBe(1);
   });
 

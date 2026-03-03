@@ -1,52 +1,42 @@
+## Plan: Make Generated ZIP a Complete, Runnable Vite + React Project
 
+The generated frontend ZIP currently only outputs `App.tsx`, `Login.tsx`, and CRUD list pages. It's missing all the scaffolding needed to actually run. Here's what needs to be added to `src/lib/generator.ts` inside the `generateFrontendFiles` function.
 
-## Plan: Fix Generator for Production-Ready Backend + Admin Frontend
+### Missing files to generate
 
-### Problems Found
+The `generateFrontendFiles` function will be expanded to also emit these files inside the `frontend/` directory:
 
-**1. Organizations table ordering bug (critical)**
-When multi-tenancy is enabled, `001_core.sql` adds `organization_id UUID NOT NULL` to every table, but the `organizations` table itself is only created in `004+_multi_tenancy.sql`. The FK constraint fails because the referenced table doesn't exist yet.
+1. `**package.json**` -- includes React, React DOM, React Router, @supabase/supabase-js, Lucide React, Tailwind CSS v4, Vite, @vitejs/plugin-react, TypeScript, and standard `dev`/`build`/`preview` scripts
+2. `**index.html**` -- root HTML with `<div id="root">` and `<script type="module" src="/src/main.tsx">`
+3. `**src/main.tsx**` -- mounts `<App />` into `#root`, imports `index.css`
+4. `**src/lib/supabase.ts**` -- creates and exports Supabase client using `import.meta.env.VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`
+5. `**src/index.css**` -- Tailwind v4 import (`@import "tailwindcss"`)
+6. `**vite.config.ts**` -- minimal Vite config with React plugin and `@` path alias
+7. `**tsconfig.json**` + `**tsconfig.app.json**` -- standard TypeScript config for Vite + React
+8. `**postcss.config.js**` -- (not needed for Tailwind v4, which uses `@import "tailwindcss"` directly)
+9. `**.env.example**` -- `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` placeholders
+10. `**src/pages/Signup.tsx**` -- currently imported in App.tsx when `loginSignup` is enabled but never generated
+11. `**src/pages/Dashboard.tsx**` -- currently imported in App.tsx when `roleDashboards` is enabled but never generated
 
-**Fix**: In `generateCoreSchema`, when `multiTenancy` is enabled, emit the `organizations` and `organization_members` tables **before** the user-defined tables. Move the table creation + trigger from `generateMultiTenancyModule` into `generateCoreSchema`, and have the multi-tenancy module only emit the helper functions, RLS policies, and FK constraints.
+### Technical approach
 
-**2. Admin role bootstrap is broken (critical)**
-The `user_roles` table has an RLS policy that says "only admins can manage roles" via `has_role()`. But when the database is fresh, no one has any role yet -- so no one can ever assign the first admin. Classic chicken-and-egg.
+All changes are in **one file**: `src/lib/generator.ts`, specifically the `generateFrontendFiles` function. We will add ~15 new `files.push(...)` calls to emit the scaffolding files listed above. The generated files use Tailwind CSS v4 (simple `@import "tailwindcss"` in CSS, no `tailwind.config` needed).
 
-**Fix**: Add a `seed.sql` instruction block that inserts the first admin role assignment using a comment explaining it must be run with service_role or via SQL editor. Also add a `FOR INSERT` policy on `user_roles` allowing users to self-assign if no admins exist yet (bootstrap policy).
+### Key details
 
-**3. Missing owner-based RLS fallback**
-When roles are defined, `003_rls.sql` only creates role-checked policies. A regular authenticated user who owns a record (via `user_id`) gets no access unless explicitly granted by a role. The `ownerClause` in the policy uses `OR auth.uid() = user_id` which is correct, but only within role-based policies -- if a user has NO role, none of these policies apply.
-
-**Fix**: In `generateRLS`, add baseline owner-based policies for all tables (users can SELECT/UPDATE/DELETE their own rows via `user_id`, and INSERT with `auth.uid() = user_id`). These are separate from the role-based policies.
-
-**4. CRUD pages have no Create/Edit UI**
-The generated list pages only show a table with a Delete button. No way to add or edit records.
-
-**Fix**: Expand the CRUD page template to include:
-- A "New" button that opens an inline form at the top
-- An "Edit" button per row that populates the form with existing data
-- The form auto-generates input fields based on column types
-- Admin-aware: if roles are configured, show a role indicator and admin-only actions
-
-**5. No role-awareness in frontend**
-The generated Dashboard and CRUD pages don't check the user's role. An admin sees the same UI as a regular user.
-
-**Fix**: Generate a `useUserRole` hook that queries `user_roles` for the current user. Use it in Dashboard/CRUD pages to conditionally show admin controls (e.g., "Manage Roles" link, bulk operations).
-
-### Changes (all in `src/lib/generator.ts`)
-
-**`generateCoreSchema`** -- When `multiTenancy` is enabled, prepend the `organizations` and `organization_members` table definitions + auto-org trigger BEFORE iterating over user tables. Add the FK reference on `organization_id` columns inline.
-
-**`generateMultiTenancyModule`** -- Remove the `CREATE TABLE organizations/organization_members` and trigger (now in core). Keep only the helper functions (`is_tenant_member`, `current_organization`), RLS policies for org tables, and FK index creation.
-
-**`generateRolesSetup`** -- Add a bootstrap policy: `CREATE POLICY "Bootstrap first admin" ON user_roles FOR INSERT TO authenticated WITH CHECK (NOT EXISTS (SELECT 1 FROM user_roles WHERE role = 'admin'))`. This allows the first user to self-assign admin, then locks down.
-
-**`generateRLS`** -- After role-based policies, add owner-based baseline policies for each table: SELECT/INSERT/UPDATE/DELETE where `auth.uid() = user_id`.
-
-**`generateSeed`** -- Add a commented-out admin bootstrap block: `-- Run with service_role to bootstrap admin: INSERT INTO user_roles (user_id, role) VALUES ('<your-user-id>', 'admin');`
-
-**`generateFrontendFiles`** -- New/updated files:
-- `src/hooks/useUserRole.ts` -- queries `user_roles` for current user's role
-- Update CRUD list pages to include Create form, Edit button, and role-aware admin controls
-- Update Dashboard to show admin section (role management link, system stats) when user has admin role
-
+- All generated frontend files go under `frontend/` prefix in the ZIP
+- The `supabase.ts` client reads from env vars so the user just fills in `.env`
+- Missing page components (`Signup`, `Dashboard`) get functional placeholder implementations
+- `package.json` pins stable versions of all dependencies
+  ## **Database Trigger for Auto-Organization:**
+  - **Action:** Add a PostgreSQL function and trigger to the SQL generation logic.
+  - **Logic:** When a new user is created in `auth.users`, automatically `INSERT` a corresponding record into `public.organizations` using the `new.id` as the `owner_id`.
+  - **Why:** This ensures every user has a "Home Organization" immediately upon signup, preventing foreign key violations on `organization_id`.
+  ## **Global Organization Context & Hook:**
+  - **Action:** Generate `src/hooks/useOrganization.ts`.
+  - **Logic:** Create a hook that fetches the user's `organization_id` from the `organizations` table on app load and stores it in memory.
+  - **Why:** Centralizes the ID so that all pages can access it without redundant database calls.
+  ## **Automatic Query Injection:**
+  - **Action:** Update the CRUD page templates (`ProductsList`, `SalesList`, etc.).
+  - **Logic:** Every `.from().select()` and `.from().insert()` call must automatically include the `organization_id` filter (e.g., `.eq('organization_id', orgId)` or `.insert({ ..., organization_id: orgId })`).
+  - **Why:** Guarantees that data is isolated between users and satisfies `NOT NULL` constraints.
