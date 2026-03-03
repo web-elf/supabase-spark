@@ -442,13 +442,12 @@ describe("generateProject — roles and RLS", () => {
 // ─── Multi-Tenancy Module ────────────────────────────────────────────────────
 
 describe("generateProject — multi-tenancy module", () => {
-  it("generates organizations and organization_members tables", () => {
+  it("generates organizations and organization_members tables in core schema", () => {
     const config = makeConfig({ features: { ...DEFAULT_FEATURES, multiTenancy: true } });
     const files = generateProject(config);
-    const mt = files.find((f) => f.path.includes("multi_tenancy"));
-    expect(mt).toBeDefined();
-    expect(mt!.content).toContain("CREATE TABLE public.organizations");
-    expect(mt!.content).toContain("CREATE TABLE public.organization_members");
+    const core = findFile(files, "001_core.sql")!;
+    expect(core.content).toContain("CREATE TABLE public.organizations");
+    expect(core.content).toContain("CREATE TABLE public.organization_members");
   });
 
   it("creates is_tenant_member() function", () => {
