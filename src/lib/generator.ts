@@ -74,7 +74,7 @@ export function generateProject(config: ProjectConfig): GeneratedFile[] {
     files.push(...generateIntegrationFramework());
   }
 
-  // 7. Frontend (optional, unchanged)
+  // 7. Frontend (optional)
   if (config.frontendOptions.enabled) {
     files.push(...generateFrontendFiles(config));
   }
@@ -102,6 +102,59 @@ function generateCoreSchema(config: ProjectConfig): string {
     "",
   ];
 
+  // ── Multi-tenancy: organizations & org_members MUST come first ──────────
+  if (config.features.multiTenancy) {
+    lines.push("-- ── Organizations (multi-tenancy core) ──────────────────────");
+    lines.push(`CREATE TABLE public.organizations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  slug TEXT UNIQUE NOT NULL,
+  owner_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  settings JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);`);
+    lines.push("");
+    lines.push("ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;");
+    lines.push("");
+
+    lines.push(`CREATE TABLE public.organization_members (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
+  organization_id UUID REFERENCES public.organizations(id) ON DELETE CASCADE NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, organization_id)
+);`);
+    lines.push("");
+    lines.push("ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;");
+    lines.push("");
+
+    // Auto-create org trigger
+    lines.push(`-- Auto-create a "Home Organization" for every new user on signup
+CREATE OR REPLACE FUNCTION public.handle_new_user_org()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  new_org_id UUID;
+BEGIN
+  INSERT INTO public.organizations (name, slug, owner_id)
+  VALUES ('My Organization', 'org-' || LEFT(NEW.id::TEXT, 8), NEW.id)
+  RETURNING id INTO new_org_id;
+
+  INSERT INTO public.organization_members (user_id, organization_id, role)
+  VALUES (NEW.id, new_org_id, 'admin');
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_auth_user_created_org
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user_org();`);
+    lines.push("");
+  }
+
+  // ── User-defined tables ────────────────────────────────────────────────────
   for (const table of config.tables) {
     if (!table.name) continue;
 
@@ -117,7 +170,6 @@ function generateCoreSchema(config: ProjectConfig): string {
       if (col.isRequired && !col.isPrimary) def += " NOT NULL";
       if (col.isUnique && !col.isPrimary) def += " UNIQUE";
       if (col.defaultValue) def += ` DEFAULT ${col.defaultValue}`;
-      // Handle foreign key references
       if (col.references) {
         def += ` REFERENCES ${col.references.table}(${col.references.column}) ON DELETE CASCADE`;
       }
@@ -140,9 +192,8 @@ function generateCoreSchema(config: ProjectConfig): string {
     }
 
     if (config.features.multiTenancy) {
-      // Check if organization_id already exists as a column
       if (!table.columns.some((c) => c.name === "organization_id")) {
-        colDefs.push("  organization_id UUID NOT NULL");
+        colDefs.push("  organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE");
       }
     }
 
@@ -157,6 +208,10 @@ function generateCoreSchema(config: ProjectConfig): string {
       }
     }
 
+    if (config.features.multiTenancy) {
+      lines.push(`CREATE INDEX idx_${table.name}_org ON public.${table.name}(organization_id);`);
+    }
+
     // RLS — secure by default
     lines.push(`-- SECURITY: RLS enabled. Without policies, all access is denied.`);
     lines.push(`ALTER TABLE public.${table.name} ENABLE ROW LEVEL SECURITY;`);
@@ -166,7 +221,6 @@ function generateCoreSchema(config: ProjectConfig): string {
   // Foreign keys for 1:1 and 1:N relationships
   for (const rel of config.relationships) {
     if (rel.type === "1:1" || rel.type === "1:N") {
-      // Check if the foreign key column already exists in the table definition
       const toTable = config.tables.find(t => t.name === rel.to.table);
       const fkColumnName = `${rel.from.table}_id`;
       const columnExists = toTable?.columns.some(c => c.name === fkColumnName || c.name === rel.to.column);
@@ -217,6 +271,7 @@ $$;
 
 function generateRolesSetup(config: ProjectConfig): string {
   const roleNames = config.roles.map((r) => `'${r.name}'`).join(", ");
+  const adminRole = getAdminRoleName(config) || config.roles[0]?.name || 'admin';
   return `-- ============================================================
 -- Role-Based Access Control Setup
 -- SECURITY: Roles are stored in a separate table (not on profiles)
@@ -243,6 +298,14 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   )
 $$;
 
+-- Security definer function to get user's role (avoids RLS recursion)
+CREATE OR REPLACE FUNCTION public.get_my_role()
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT role::TEXT FROM public.user_roles
+  WHERE user_id = auth.uid()
+  LIMIT 1
+$$;
+
 ${config.features.multiTenancy ? `
 -- Helper: Check if the current user is a member of the given org (stub for multi-tenancy)
 -- Full implementation is in the multi-tenancy migration
@@ -262,7 +325,17 @@ CREATE POLICY "Users can view own roles"
 CREATE POLICY "Admins can manage roles"
   ON public.user_roles FOR ALL
   TO authenticated
-  USING (public.has_role(auth.uid(), '${config.roles[0]?.name || 'admin'}'));
+  USING (public.has_role(auth.uid(), '${adminRole}'));
+
+-- BOOTSTRAP: Allow first admin to self-assign when no admins exist yet.
+-- Once an admin exists, this policy stops granting access.
+CREATE POLICY "Bootstrap first admin"
+  ON public.user_roles FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    auth.uid() = user_id
+    AND NOT EXISTS (SELECT 1 FROM public.user_roles WHERE role = '${adminRole}')
+  );
 `;
 }
 
@@ -278,6 +351,7 @@ function generateRLS(config: ProjectConfig): string {
     "",
   ];
 
+  // ── Role-based policies ────────────────────────────────────────────────────
   for (const role of config.roles) {
     if (!role.name) continue;
     for (const table of config.tables) {
@@ -285,7 +359,6 @@ function generateRLS(config: ProjectConfig): string {
       const perms = role.permissions[table.name];
       if (!perms) continue;
 
-      const ownerClause = config.features.auth ? " OR auth.uid() = user_id" : "";
       const tenantClause = config.features.multiTenancy
         ? " OR public.is_tenant_member(organization_id)"
         : "";
@@ -293,28 +366,61 @@ function generateRLS(config: ProjectConfig): string {
       if (perms.select) {
         lines.push(`CREATE POLICY "${role.name}_select_${table.name}"`);
         lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${ownerClause}${tenantClause});`);
+        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
         lines.push("");
       }
       if (perms.insert) {
         lines.push(`CREATE POLICY "${role.name}_insert_${table.name}"`);
         lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
-        lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${ownerClause}${tenantClause});`);
+        lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
         lines.push("");
       }
       if (perms.update) {
         lines.push(`CREATE POLICY "${role.name}_update_${table.name}"`);
         lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${ownerClause}${tenantClause});`);
+        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
         lines.push("");
       }
       if (perms.delete) {
         lines.push(`CREATE POLICY "${role.name}_delete_${table.name}"`);
         lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${ownerClause}${tenantClause});`);
+        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
         lines.push("");
       }
     }
+  }
+
+  // ── Owner-based baseline policies ──────────────────────────────────────────
+  // These ensure authenticated users can always manage their OWN records
+  // even if they don't have a role assigned yet.
+  lines.push("-- ── Owner-based baseline policies ────────────────────────────");
+  lines.push("-- Ensures users can always manage their own records (via user_id).");
+  lines.push("");
+
+  for (const table of config.tables) {
+    if (!table.name) continue;
+    const hasUserId = config.features.auth || table.columns.some(c => c.name === "user_id");
+    if (!hasUserId) continue;
+
+    lines.push(`CREATE POLICY "owner_select_${table.name}"`);
+    lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
+    lines.push(`  USING (auth.uid() = user_id);`);
+    lines.push("");
+
+    lines.push(`CREATE POLICY "owner_insert_${table.name}"`);
+    lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
+    lines.push(`  WITH CHECK (auth.uid() = user_id);`);
+    lines.push("");
+
+    lines.push(`CREATE POLICY "owner_update_${table.name}"`);
+    lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
+    lines.push(`  USING (auth.uid() = user_id);`);
+    lines.push("");
+
+    lines.push(`CREATE POLICY "owner_delete_${table.name}"`);
+    lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
+    lines.push(`  USING (auth.uid() = user_id);`);
+    lines.push("");
   }
 
   return lines.join("\n");
@@ -500,14 +606,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-/**
- * Rate Limiter Middleware
- * 
- * Usage: Call this function before processing a request to check
- * if the user/IP has exceeded their rate limit.
- * 
- * Returns 429 Too Many Requests with Retry-After header when exceeded.
- */
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
@@ -521,7 +619,6 @@ serve(async (req) => {
   try {
     const { endpoint, user_id, ip_address } = await req.json()
 
-    // 1. Get rate limit config for this endpoint
     const { data: limitConfig } = await supabase
       .from('api_rate_limits')
       .select('*')
@@ -530,8 +627,6 @@ serve(async (req) => {
 
     const maxRequests = limitConfig?.max_requests ?? 100
     const windowSeconds = limitConfig?.window_seconds ?? 60
-
-    // 2. Count recent requests in the window
     const windowStart = new Date(Date.now() - windowSeconds * 1000).toISOString()
 
     let query = supabase
@@ -540,7 +635,6 @@ serve(async (req) => {
       .eq('endpoint', endpoint)
       .gte('created_at', windowStart)
 
-    // Check by user_id first, then fall back to IP
     if (user_id) {
       query = query.eq('user_id', user_id)
     } else if (ip_address) {
@@ -549,14 +643,12 @@ serve(async (req) => {
 
     const { count } = await query
 
-    // 3. Log this request
     await supabase.from('request_logs').insert({
       endpoint,
       user_id: user_id || null,
       ip_address: ip_address || null,
     })
 
-    // 4. Check limit
     if ((count ?? 0) >= maxRequests) {
       return new Response(
         JSON.stringify({ error: 'Rate limit exceeded', retry_after: windowSeconds }),
@@ -591,36 +683,15 @@ serve(async (req) => {
 }
 
 // ─── Module: Multi-Tenancy ───────────────────────────────────────────────────
+// NOTE: Table creation (organizations, organization_members) and the auto-org
+// trigger are now in generateCoreSchema. This module only adds helper functions,
+// RLS policies, and FK constraints.
 
 function generateMultiTenancyModule(config: ProjectConfig): GeneratedFile[] {
   let sql = `-- ============================================================
--- Module: Multi-Tenancy
--- SECURITY: Tenant isolation enforced via RLS.
--- organization_id column added to all user tables in core schema.
+-- Module: Multi-Tenancy (helpers, RLS policies, FK constraints)
+-- Tables & trigger are created in 001_core.sql.
 -- ============================================================
-
-CREATE TABLE public.organizations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL,
-  slug TEXT UNIQUE NOT NULL,
-  owner_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-  settings JSONB DEFAULT '{}',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
-
-CREATE TABLE public.organization_members (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
-  organization_id UUID REFERENCES public.organizations(id) ON DELETE CASCADE NOT NULL,
-  role TEXT NOT NULL DEFAULT 'member',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(user_id, organization_id)
-);
-
-ALTER TABLE public.organization_members ENABLE ROW LEVEL SECURITY;
 
 -- Helper: Check if the current user is a member of the given org
 -- This replaces the stub created in the roles migration
@@ -666,42 +737,7 @@ CREATE POLICY "Org admins can manage members"
         AND om.role = 'admin'
     )
   );
-
--- Auto-create a "Home Organization" for every new user on signup
-CREATE OR REPLACE FUNCTION public.handle_new_user_org()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  new_org_id UUID;
-BEGIN
-  INSERT INTO public.organizations (name, slug, owner_id)
-  VALUES ('My Organization', 'org-' || LEFT(NEW.id::TEXT, 8), NEW.id)
-  RETURNING id INTO new_org_id;
-
-  INSERT INTO public.organization_members (user_id, organization_id, role)
-  VALUES (NEW.id, new_org_id, 'admin');
-
-  RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER on_auth_user_created_org
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user_org();
 `;
-
-  // Add foreign key from user tables to organizations
-  for (const table of config.tables) {
-    if (!table.name) continue;
-    // Check if the table already has organization_id defined with a reference
-    const orgColumn = table.columns.find(c => c.name === "organization_id");
-    const hasOrgReference = orgColumn?.references?.table === "organizations";
-    
-    if (!hasOrgReference && config.features.multiTenancy) {
-      sql += `\n-- Tenant FK for ${table.name}`;
-      sql += `\nALTER TABLE public.${table.name} ADD CONSTRAINT fk_${table.name}_org FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;`;
-      sql += `\nCREATE INDEX idx_${table.name}_org ON public.${table.name}(organization_id);`;
-    }
-  }
 
   return [{ path: "migrations/multi_tenancy.sql", content: sql, category: "sql" }];
 }
@@ -756,7 +792,6 @@ ALTER TABLE public.error_logs ENABLE ROW LEVEL SECURITY;
 CREATE INDEX idx_error_logs_created_at ON public.error_logs(created_at);
 CREATE INDEX idx_error_logs_severity ON public.error_logs(severity);
 
--- SECURITY: Only admins can view error logs
 ${adminRole ? `CREATE POLICY "Admins can view error logs"
   ON public.error_logs FOR SELECT TO authenticated
   USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, error logs are service-role only'}
@@ -779,7 +814,6 @@ ALTER TABLE public.api_metrics ENABLE ROW LEVEL SECURITY;
 CREATE INDEX idx_api_metrics_created_at ON public.api_metrics(created_at);
 CREATE INDEX idx_api_metrics_endpoint ON public.api_metrics(endpoint);
 
--- SECURITY: Only admins can view API metrics
 ${adminRole ? `CREATE POLICY "Admins can view api metrics"
   ON public.api_metrics FOR SELECT TO authenticated
   USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, API metrics are service-role only'}
@@ -797,12 +831,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-/**
- * API Logger Middleware
- * 
- * Logs request duration, status codes, and endpoint usage.
- * Call this from your edge functions to track API performance.
- */
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
@@ -816,7 +844,6 @@ serve(async (req) => {
   try {
     const { endpoint, method, status_code, duration_ms, user_id, action, resource_type, resource_id, metadata, error_type, message, stack_trace, severity } = await req.json()
 
-    // Log API metric
     if (endpoint && status_code) {
       await supabase.from('api_metrics').insert({
         endpoint,
@@ -827,7 +854,6 @@ serve(async (req) => {
       })
     }
 
-    // Log activity
     if (action) {
       await supabase.from('activity_logs').insert({
         user_id: user_id || null,
@@ -838,7 +864,6 @@ serve(async (req) => {
       })
     }
 
-    // Log error
     if (error_type) {
       await supabase.from('error_logs').insert({
         error_type,
@@ -890,13 +915,11 @@ CREATE TABLE public.feature_flags (
 
 ALTER TABLE public.feature_flags ENABLE ROW LEVEL SECURITY;
 
--- All authenticated users can check feature flags
 CREATE POLICY "Authenticated can read flags"
   ON public.feature_flags FOR SELECT TO authenticated
   USING (true);
 
-${adminRole ? `-- Only admins can manage feature flags
-CREATE POLICY "Admins can insert flags"
+${adminRole ? `CREATE POLICY "Admins can insert flags"
   ON public.feature_flags FOR INSERT TO authenticated
   WITH CHECK (public.has_role(auth.uid(), '${adminRole}'));
 
@@ -908,7 +931,6 @@ CREATE POLICY "Admins can delete flags"
   ON public.feature_flags FOR DELETE TO authenticated
   USING (public.has_role(auth.uid(), '${adminRole}'));` : '-- No admin role defined, feature flags are service-role only for management'}
 
--- Helper function to check if a feature is enabled
 CREATE OR REPLACE FUNCTION public.is_feature_enabled(_flag_key TEXT)
 RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
@@ -917,7 +939,6 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   )
 $$;
 
--- Auto-update updated_at
 CREATE TRIGGER update_feature_flags_updated_at
   BEFORE UPDATE ON public.feature_flags
   FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
@@ -958,22 +979,18 @@ ALTER TABLE public.jobs ENABLE ROW LEVEL SECURITY;
 CREATE INDEX idx_jobs_status_scheduled ON public.jobs(status, scheduled_at);
 CREATE INDEX idx_jobs_created_by ON public.jobs(created_by);
 
--- Users can view their own jobs
 CREATE POLICY "Users can view own jobs"
   ON public.jobs FOR SELECT TO authenticated
   USING (auth.uid() = created_by);
 
-${adminRole ? `-- Admins can manage all jobs
-CREATE POLICY "Admins can manage all jobs"
+${adminRole ? `CREATE POLICY "Admins can manage all jobs"
   ON public.jobs FOR ALL TO authenticated
   USING (public.has_role(auth.uid(), '${adminRole}'));` : ''}
 
--- Service role can manage jobs (for worker functions)
 CREATE POLICY "Service can manage jobs"
   ON public.jobs FOR ALL TO service_role
   USING (true);
 
--- Claim a job atomically using FOR UPDATE SKIP LOCKED
 CREATE OR REPLACE FUNCTION public.claim_job(_job_type TEXT DEFAULT NULL)
 RETURNS SETOF public.jobs LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -1014,13 +1031,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-/**
- * Job Worker
- * 
- * Claims a pending job from the queue and processes it.
- * Uses FOR UPDATE SKIP LOCKED for safe concurrent processing.
- * Includes built-in retry logic via max_attempts.
- */
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
@@ -1035,7 +1045,6 @@ serve(async (req) => {
     const body = await req.json().catch(() => ({}))
     const jobType = body.job_type || null
 
-    // Claim a job
     const { data: jobs, error: claimError } = await supabase
       .rpc('claim_job', { _job_type: jobType })
 
@@ -1049,20 +1058,15 @@ serve(async (req) => {
     const job = jobs[0]
 
     try {
-      // ─── Process job based on type ───
-      // Add your job handlers here:
       switch (job.type) {
         case 'send_email':
-          // await sendEmail(job.payload)
           break
         case 'generate_report':
-          // await generateReport(job.payload)
           break
         default:
           console.log(\`Processing job type: \${job.type}\`, job.payload)
       }
 
-      // Mark job as completed
       await supabase
         .from('jobs')
         .update({ status: 'completed', completed_at: new Date().toISOString() })
@@ -1072,7 +1076,6 @@ serve(async (req) => {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
     } catch (processingError) {
-      // Mark job as failed (will be retried if attempts < max_attempts)
       const newStatus = job.attempts >= job.max_attempts ? 'failed' : 'pending'
       await supabase
         .from('jobs')
@@ -1105,18 +1108,11 @@ serve(async (req) => {
 function generateIntegrationFramework(): GeneratedFile[] {
   const baseClient = `/**
  * Base HTTP Client
- * Generic HTTP client with timeout, headers, and error handling.
- * 
- * Usage:
- *   const client = new BaseClient('https://api.example.com', {
- *     headers: { 'Authorization': 'Bearer ' + Deno.env.get('API_KEY') }
- *   });
- *   const data = await client.get('/users');
  */
 
 export interface ClientOptions {
   headers?: Record<string, string>;
-  timeout?: number; // ms, default 30000
+  timeout?: number;
 }
 
 export class BaseClient {
@@ -1126,34 +1122,25 @@ export class BaseClient {
 
   constructor(baseUrl: string, options: ClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\\/$/, '');
-    this.headers = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
+    this.headers = { 'Content-Type': 'application/json', ...options.headers };
     this.timeout = options.timeout ?? 30000;
   }
 
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
-
     try {
       const response = await fetch(\`\${this.baseUrl}\${path}\`, {
-        method,
-        headers: this.headers,
+        method, headers: this.headers,
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-
       if (!response.ok) {
         const errorBody = await response.text();
         throw new Error(\`HTTP \${response.status}: \${errorBody}\`);
       }
-
       return await response.json() as T;
-    } finally {
-      clearTimeout(timer);
-    }
+    } finally { clearTimeout(timer); }
   }
 
   get<T = unknown>(path: string) { return this.request<T>('GET', path); }
@@ -1164,154 +1151,71 @@ export class BaseClient {
 `;
 
   const retryWrapper = `/**
- * Retry Wrapper
- * Exponential backoff retry logic for unreliable operations.
- * 
- * Usage:
- *   const result = await withRetry(() => client.get('/data'), { maxRetries: 3 });
+ * Retry Wrapper with exponential backoff
  */
 
 export interface RetryOptions {
-  maxRetries?: number;       // default 3
-  initialDelayMs?: number;   // default 1000
-  maxDelayMs?: number;       // default 30000
-  backoffFactor?: number;    // default 2
-  retryOn?: (error: Error) => boolean; // custom retry condition
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  backoffFactor?: number;
+  retryOn?: (error: Error) => boolean;
 }
 
 export async function withRetry<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {}
 ): Promise<T> {
-  const {
-    maxRetries = 3,
-    initialDelayMs = 1000,
-    maxDelayMs = 30000,
-    backoffFactor = 2,
-    retryOn = () => true,
-  } = options;
-
+  const { maxRetries = 3, initialDelayMs = 1000, maxDelayMs = 30000, backoffFactor = 2, retryOn = () => true } = options;
   let lastError: Error;
-
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
+    try { return await fn(); } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-
-      if (attempt === maxRetries || !retryOn(lastError)) {
-        throw lastError;
-      }
-
+      if (attempt === maxRetries || !retryOn(lastError)) throw lastError;
       const delay = Math.min(initialDelayMs * Math.pow(backoffFactor, attempt), maxDelayMs);
-      const jitter = delay * (0.5 + Math.random() * 0.5);
-      await new Promise((resolve) => setTimeout(resolve, jitter));
+      await new Promise((resolve) => setTimeout(resolve, delay * (0.5 + Math.random() * 0.5)));
     }
   }
-
   throw lastError!;
 }
 `;
 
   const webhookHandler = `/**
- * Webhook Handler
- * HMAC-SHA256 signature verification for incoming webhooks.
- * 
- * Usage:
- *   const isValid = await verifyWebhookSignature(requestBody, signatureHeader, secret);
+ * Webhook Handler — HMAC-SHA256 signature verification
  */
 
 export async function verifyWebhookSignature(
-  payload: string,
-  signature: string,
-  secret: string
+  payload: string, signature: string, secret: string
 ): Promise<boolean> {
   const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
-  const computed = Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-
-  // Constant-time comparison to prevent timing attacks
+  const computed = Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('');
   if (computed.length !== signature.length) return false;
   let result = 0;
-  for (let i = 0; i < computed.length; i++) {
-    result |= computed.charCodeAt(i) ^ signature.charCodeAt(i);
-  }
+  for (let i = 0; i < computed.length; i++) result |= computed.charCodeAt(i) ^ signature.charCodeAt(i);
   return result === 0;
 }
-
-/**
- * Example webhook handler edge function pattern:
- * 
- * serve(async (req) => {
- *   const body = await req.text();
- *   const signature = req.headers.get('x-webhook-signature') || '';
- *   const secret = Deno.env.get('WEBHOOK_SECRET')!;
- *   
- *   if (!await verifyWebhookSignature(body, signature, secret)) {
- *     return new Response('Invalid signature', { status: 401 });
- *   }
- *   
- *   const payload = JSON.parse(body);
- *   // Process webhook...
- * });
- */
 `;
 
-  const exampleIntegration = `/**
- * Example Integration
- * Shows how to combine BaseClient + RetryWrapper for a real API.
- * Copy and modify this for your integrations.
- */
-
-import { BaseClient } from './base-client.ts';
+  const exampleIntegration = `import { BaseClient } from './base-client.ts';
 import { withRetry } from './retry-wrapper.ts';
 
-// Initialize client with env-based configuration
 const apiClient = new BaseClient('https://api.example.com/v1', {
-  headers: {
-    'Authorization': \`Bearer \${Deno.env.get('EXAMPLE_API_KEY') || ''}\`,
-  },
+  headers: { 'Authorization': \`Bearer \${Deno.env.get('EXAMPLE_API_KEY') || ''}\` },
   timeout: 15000,
 });
 
-// Typed response interfaces
-interface ExampleUser {
-  id: string;
-  name: string;
-  email: string;
-}
+interface ExampleUser { id: string; name: string; email: string; }
 
-// API methods with retry
 export async function getUser(userId: string): Promise<ExampleUser> {
-  return withRetry(
-    () => apiClient.get<ExampleUser>(\`/users/\${userId}\`),
-    { maxRetries: 2, initialDelayMs: 500 }
-  );
+  return withRetry(() => apiClient.get<ExampleUser>(\`/users/\${userId}\`), { maxRetries: 2 });
 }
 
 export async function createUser(data: Omit<ExampleUser, 'id'>): Promise<ExampleUser> {
-  return withRetry(
-    () => apiClient.post<ExampleUser>('/users', data),
-    {
-      maxRetries: 1,
-      // Only retry on network errors, not validation errors
-      retryOn: (error) => !error.message.includes('HTTP 4'),
-    }
-  );
-}
-
-export async function listUsers(): Promise<ExampleUser[]> {
-  return withRetry(() => apiClient.get<ExampleUser[]>('/users'));
+  return withRetry(() => apiClient.post<ExampleUser>('/users', data), {
+    maxRetries: 1, retryOn: (error) => !error.message.includes('HTTP 4'),
+  });
 }
 `;
 
@@ -1327,6 +1231,22 @@ export async function listUsers(): Promise<ExampleUser[]> {
 
 function generateSeed(config: ProjectConfig): string {
   const lines: string[] = ["-- Seed Data", ""];
+
+  // Admin bootstrap instructions
+  if (config.roles.length > 0) {
+    const adminRole = getAdminRoleName(config) || config.roles[0]?.name || 'admin';
+    lines.push("-- ============================================================");
+    lines.push("-- ADMIN BOOTSTRAP");
+    lines.push("-- Run this with service_role or via SQL Editor to create the first admin.");
+    lines.push("-- Replace <your-user-id> with the UUID from auth.users after signup.");
+    lines.push("-- ============================================================");
+    lines.push(`-- INSERT INTO public.user_roles (user_id, role) VALUES ('<your-user-id>', '${adminRole}');`);
+    lines.push("");
+    lines.push("-- ALTERNATIVE: The 'Bootstrap first admin' RLS policy allows the");
+    lines.push("-- first user to self-assign admin via the frontend if no admin exists yet.");
+    lines.push("");
+  }
+
   for (const table of config.tables) {
     if (!table.name || table.columns.length === 0) continue;
     const cols = table.columns.filter((c) => !c.isPrimary && c.name !== "created_at" && c.name !== "updated_at" && c.name !== "deleted_at");
@@ -1440,6 +1360,8 @@ serve(async (req) => {
 function generateFrontendFiles(config: ProjectConfig): GeneratedFile[] {
   const files: GeneratedFile[] = [];
   const hasMT = config.features.multiTenancy;
+  const hasRoles = config.roles.length > 0;
+  const adminRole = getAdminRoleName(config);
 
   // ── package.json ───────────────────────────────────────────────────────────
   files.push({
@@ -1598,8 +1520,6 @@ export default defineConfig({
   files.push({
     path: "frontend/.env.example",
     content: `# Copy this file to .env and fill in your Supabase credentials.
-# You can find these in your Supabase dashboard under Settings > API.
-
 VITE_SUPABASE_URL=https://your-project-id.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key-here`,
     category: "frontend",
@@ -1630,6 +1550,50 @@ export function useOrganization() {
   }, []);
 
   return { orgId, loading };
+}`,
+      category: "frontend",
+    });
+  }
+
+  // ── useUserRole hook (roles only) ──────────────────────────────────────────
+  if (hasRoles) {
+    files.push({
+      path: "frontend/src/hooks/useUserRole.ts",
+      content: `import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+
+let cachedRole: string | null = null;
+
+export function useUserRole() {
+  const [role, setRole] = useState<string | null>(cachedRole);
+  const [loading, setLoading] = useState(!cachedRole);
+
+  useEffect(() => {
+    if (cachedRole) { setRole(cachedRole); setLoading(false); return; }
+    supabase.rpc('get_my_role').then(({ data, error }) => {
+      if (!error && data) {
+        cachedRole = data as string;
+        setRole(data as string);
+      }
+      setLoading(false);
+    });
+  }, []);
+
+  const isAdmin = role === '${adminRole}';
+
+  const bootstrapAdmin = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return false;
+    const { error } = await supabase.from('user_roles').insert({ user_id: user.id, role: '${adminRole}' });
+    if (!error) {
+      cachedRole = '${adminRole}';
+      setRole('${adminRole}');
+      return true;
+    }
+    return false;
+  };
+
+  return { role, loading, isAdmin, bootstrapAdmin };
 }`,
       category: "frontend",
     });
@@ -1736,32 +1700,67 @@ export default function Signup() {
 
   // ── Dashboard.tsx ──────────────────────────────────────────────────────────
   if (config.frontendOptions.roleDashboards) {
-    const navLinks = config.tables.map(t => `          <a href="/${t.name}" className="text-blue-600 hover:underline">${capitalize(t.name)}</a>`).join("\n");
+    const navLinks = config.tables.map(t => `          <a href="/${t.name}" className="px-4 py-2 bg-white rounded shadow hover:shadow-md transition text-blue-600 font-medium">${capitalize(t.name)}</a>`).join("\n");
     files.push({
       path: "frontend/src/pages/Dashboard.tsx",
       content: `import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
+${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
 export default function Dashboard() {
   const [user, setUser] = useState<any>(null);
 ${hasMT ? "  const { orgId, loading: orgLoading } = useOrganization();" : ""}
+${hasRoles ? "  const { role, isAdmin, bootstrapAdmin, loading: roleLoading } = useUserRole();" : ""}
+${hasRoles ? "  const [bootstrapping, setBootstrapping] = useState(false);" : ""}
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user));
   }, []);
+
+${hasRoles ? `  const handleBootstrap = async () => {
+    setBootstrapping(true);
+    const success = await bootstrapAdmin();
+    if (!success) alert('Could not assign admin role. An admin may already exist.');
+    setBootstrapping(false);
+  };` : ""}
 
   return (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow p-4 flex items-center justify-between">
         <h1 className="text-xl font-bold">${config.projectName || "Dashboard"}</h1>
         <div className="flex items-center gap-4">
+${hasRoles ? `          {!roleLoading && role && <span className="text-xs font-semibold px-2 py-1 bg-blue-100 text-blue-800 rounded-full uppercase">{role}</span>}` : ""}
           <span className="text-sm text-gray-600">{user?.email}</span>
           <button onClick={() => supabase.auth.signOut().then(() => window.location.href = '/login')} className="text-sm text-red-600 hover:underline">Sign Out</button>
         </div>
       </nav>
-      <main className="p-8">
-${hasMT ? `        {orgLoading ? <p>Loading…</p> : <p className="text-sm text-gray-500 mb-4">Organization: {orgId ?? 'None'}</p>}` : ""}
+      <main className="p-8 max-w-4xl mx-auto">
+${hasMT ? `        {orgLoading ? <p>Loading…</p> : <p className="text-sm text-gray-500 mb-4">Organization: <code className="bg-gray-100 px-1 rounded">{orgId ?? 'None'}</code></p>}` : ""}
+
+${hasRoles ? `        {/* Admin Section */}
+        {!roleLoading && isAdmin && (
+          <div className="mb-8 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <h2 className="text-lg font-semibold text-blue-900 mb-2">🛡️ Admin Panel</h2>
+            <p className="text-sm text-blue-700 mb-2">You have admin privileges. You can manage all records across CRUD pages.</p>
+          </div>
+        )}
+
+        {/* Bootstrap: show when no role and roles are configured */}
+        {!roleLoading && !role && (
+          <div className="mb-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <h2 className="text-lg font-semibold text-yellow-900 mb-2">⚡ No Role Assigned</h2>
+            <p className="text-sm text-yellow-700 mb-3">If you are the first user, you can bootstrap yourself as admin.</p>
+            <button
+              onClick={handleBootstrap}
+              disabled={bootstrapping}
+              className="px-4 py-2 bg-yellow-600 text-white rounded hover:bg-yellow-700 disabled:opacity-50 text-sm font-medium"
+            >
+              {bootstrapping ? 'Assigning…' : 'Become Admin'}
+            </button>
+          </div>
+        )}` : ""}
+
         <h2 className="text-lg font-semibold mb-4">Quick Links</h2>
         <div className="flex flex-wrap gap-4">
 ${navLinks}
@@ -1774,7 +1773,7 @@ ${navLinks}
     });
   }
 
-  // ── CRUD List pages ────────────────────────────────────────────────────────
+  // ── CRUD List pages with Create/Edit forms ─────────────────────────────────
   if (config.frontendOptions.crudPages) {
     for (const table of config.tables) {
       if (!table.name) continue;
@@ -1782,16 +1781,49 @@ ${navLinks}
       const orgFilter = hasMT ? `\n    if (orgId) query = query.eq('organization_id', orgId);` : "";
       const orgInsert = hasMT ? `, organization_id: orgId` : "";
 
+      // Generate form fields based on column types
+      const formFieldsJsx = cols.map(c => {
+        const inputType = c.type === 'boolean' ? 'checkbox' :
+          c.type === 'int' || c.type === 'bigint' || c.type === 'float' || c.type === 'serial' || c.type === 'bigserial' ? 'number' :
+          c.type === 'date' ? 'date' :
+          c.type === 'timestamp' || c.type === 'timestamptz' ? 'datetime-local' :
+          'text';
+        
+        if (c.type === 'boolean') {
+          return `            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={!!form.${c.name}} onChange={(e) => setForm({...form, ${c.name}: e.target.checked})} className="rounded" />
+              ${c.name}
+            </label>`;
+        }
+        if (c.type === 'jsonb' || c.type === 'json') {
+          return `            <textarea placeholder="${c.name}" value={typeof form.${c.name} === 'object' ? JSON.stringify(form.${c.name}) : (form.${c.name} || '')} onChange={(e) => { try { setForm({...form, ${c.name}: JSON.parse(e.target.value)}); } catch { setForm({...form, ${c.name}: e.target.value}); } }} className="w-full border p-2 rounded text-sm" rows={2} />`;
+        }
+        return `            <input type="${inputType}" placeholder="${c.name}" value={form.${c.name} ?? ''} onChange={(e) => setForm({...form, ${c.name}: ${inputType === 'number' ? 'Number(e.target.value)' : 'e.target.value'}})} className="w-full border p-2 rounded text-sm" ${c.isRequired ? 'required' : ''} />`;
+      }).join("\n");
+
+      const emptyForm = `{${cols.map(c => {
+        if (c.type === 'boolean') return ` ${c.name}: false`;
+        if (c.type === 'int' || c.type === 'bigint' || c.type === 'float') return ` ${c.name}: 0`;
+        if (c.type === 'jsonb' || c.type === 'json') return ` ${c.name}: {}`;
+        return ` ${c.name}: ''`;
+      }).join(',')}}`;
+
       files.push({
         path: `frontend/src/pages/${capitalize(table.name)}List.tsx`,
         content: `import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
+${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
 export default function ${capitalize(table.name)}List() {
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<any>(${emptyForm});
+  const [error, setError] = useState('');
 ${hasMT ? "  const { orgId } = useOrganization();" : ""}
+${hasRoles ? "  const { isAdmin } = useUserRole();" : ""}
 
   const fetchItems = async () => {
     setLoading(true);
@@ -1803,19 +1835,77 @@ ${hasMT ? "  const { orgId } = useOrganization();" : ""}
 
   useEffect(() => { fetchItems(); }, [${hasMT ? "orgId" : ""}]);
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    
+    if (editingId) {
+      const { error } = await supabase.from('${table.name}').update(form).eq('id', editingId);
+      if (error) { setError(error.message); return; }
+    } else {
+      const { data: { user } } = await supabase.auth.getUser();
+      const { error } = await supabase.from('${table.name}').insert({ ...form, user_id: user?.id${orgInsert} });
+      if (error) { setError(error.message); return; }
+    }
+    
+    setForm(${emptyForm});
+    setEditingId(null);
+    setShowForm(false);
+    fetchItems();
+  };
+
+  const handleEdit = (item: any) => {
+    setForm({${cols.map(c => ` ${c.name}: item.${c.name}`).join(',')} });
+    setEditingId(item.id);
+    setShowForm(true);
+  };
+
   const handleDelete = async (id: string) => {
+    if (!confirm('Are you sure?')) return;
     await supabase.from('${table.name}').delete().eq('id', id);
     fetchItems();
+  };
+
+  const handleCancel = () => {
+    setForm(${emptyForm});
+    setEditingId(null);
+    setShowForm(false);
+    setError('');
   };
 
   if (loading) return <div className="p-8">Loading…</div>;
 
   return (
-    <div className="p-8">
+    <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">${capitalize(table.name)}</h1>
-        <a href="/" className="text-sm text-blue-600 hover:underline">← Back</a>
+        <div className="flex gap-2">
+          {!showForm && (
+            <button onClick={() => setShowForm(true)} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium">
+              + New ${capitalize(table.name)}
+            </button>
+          )}
+          <a href="/" className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">← Back</a>
+        </div>
       </div>
+
+      {/* Create / Edit Form */}
+      {showForm && (
+        <form onSubmit={handleSubmit} className="mb-6 p-4 bg-white rounded-lg shadow border space-y-3">
+          <h2 className="font-semibold text-lg">{editingId ? 'Edit' : 'New'} ${capitalize(table.name)}</h2>
+          {error && <p className="text-red-600 text-sm">{error}</p>}
+${formFieldsJsx}
+          <div className="flex gap-2 pt-2">
+            <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium">
+              {editingId ? 'Update' : 'Create'}
+            </button>
+            <button type="button" onClick={handleCancel} className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
       <div className="overflow-x-auto">
         <table className="w-full border-collapse bg-white shadow rounded">
           <thead>
@@ -1826,9 +1916,10 @@ ${cols.map(c => `              <th className="text-left p-3 text-sm font-medium 
           </thead>
           <tbody>
             {items.map((item) => (
-              <tr key={item.id} className="border-t">
+              <tr key={item.id} className="border-t hover:bg-gray-50">
 ${cols.map(c => `                <td className="p-3 text-sm">{String(item.${c.name} ?? '')}</td>`).join("\n")}
-                <td className="p-3 text-sm text-right">
+                <td className="p-3 text-sm text-right space-x-2">
+                  <button onClick={() => handleEdit(item)} className="text-blue-600 hover:underline text-xs">Edit</button>
                   <button onClick={() => handleDelete(item.id)} className="text-red-600 hover:underline text-xs">Delete</button>
                 </td>
               </tr>
@@ -1893,12 +1984,19 @@ ${enabledFeatures.map((f) => `- ✅ ${f.label}`).join("\n")}
 6. Copy \`.env.example\` to \`.env\` and fill in values
 7. Start locally: \`supabase start\`
 
+## Frontend Setup
+
+1. \`cd frontend\`
+2. \`cp .env.example .env\` and fill in Supabase credentials
+3. \`npm install\`
+4. \`npm run dev\`
+
 ## Structure
 
 - \`migrations/\` — Versioned SQL migrations (schema, roles, RLS, modules)
 - \`functions/\` — Edge function stubs for API endpoints
 ${config.features.apiIntegrations ? "- `integrations/` — HTTP client, retry logic, webhook templates\n" : ""}\
-${config.frontendOptions.enabled ? "- `frontend/` — React + Tailwind frontend skeleton\n" : ""}\
+- \`frontend/\` — React + Tailwind frontend (Vite + TypeScript)
 - \`seed.sql\` — Sample data for testing
 
 ## Tables
@@ -1910,16 +2008,15 @@ ${config.tables.map((t) => `- \`${t.name}\` (${t.columns.length} columns)`).join
 ${config.roles.map((r) => `- \`${r.name}\``).join("\n") || "No roles defined"}
 `;
 
-  if (config.features.rateLimiting) {
+  if (config.roles.length > 0) {
     readme += `
-## Rate Limiting
+## Admin Bootstrap
 
-Rate limits are configured in the \`api_rate_limits\` table. Each endpoint can have custom limits:
-- \`max_requests\`: Maximum requests per window (default: 100)
-- \`window_seconds\`: Time window in seconds (default: 60)
-- \`role\`: Which role this limit applies to
-
-The \`rate-limiter\` edge function checks limits by user ID or IP address.
+The first user can self-assign admin via the Dashboard "Become Admin" button.
+Alternatively, run this SQL with service_role:
+\`\`\`sql
+INSERT INTO public.user_roles (user_id, role) VALUES ('<your-user-id>', '${getAdminRoleName(config) || 'admin'}');
+\`\`\`
 `;
   }
 
@@ -1928,22 +2025,11 @@ The \`rate-limiter\` edge function checks limits by user ID or IP address.
 ## Multi-Tenancy
 
 Tenant isolation is enforced via RLS policies. Every user table includes an \`organization_id\` column.
+A "Home Organization" is auto-created for each new user on signup.
 
 Key functions:
 - \`is_tenant_member(org_id)\`: Check if user belongs to an org
 - \`current_organization()\`: Get the user's current org ID
-
-Organizations are managed via the \`organizations\` and \`organization_members\` tables.
-`;
-  }
-
-  if (config.features.featureFlags) {
-    readme += `
-## Feature Flags
-
-Feature flags are stored in the \`feature_flags\` table. Use \`is_feature_enabled('flag_key')\` in your SQL or RLS policies.
-
-Only admins can create/update/delete flags. All authenticated users can read them.
 `;
   }
 
@@ -1951,19 +2037,9 @@ Only admins can create/update/delete flags. All authenticated users can read the
 ## Security Notes
 
 - All tables have RLS enabled by default (deny-all without explicit policies)
+- Owner-based baseline policies ensure users can always manage their own records
 - Roles are stored in a separate \`user_roles\` table (not on profiles) to prevent escalation
 - The \`has_role()\` function uses SECURITY DEFINER to avoid recursive RLS
-- All generated SQL includes security decision comments
-
-## Deployment Checklist
-
-- [ ] Copy all migration files to \`supabase/migrations/\`
-- [ ] Run \`supabase db push\` to apply schema
-- [ ] Deploy edge functions with \`supabase functions deploy\`
-- [ ] Set environment variables from \`.env.example\`
-- [ ] Create initial admin user and assign 'admin' role
-- [ ] Verify RLS policies are working as expected
-- [ ] Run seed data if needed: \`psql -f seed.sql\`
 `;
 
   return readme;
@@ -1988,23 +2064,19 @@ function generateApiDocs(config: ProjectConfig): string {
   if (config.features.rateLimiting) {
     lines.push("## Rate Limiter", "");
     lines.push("### POST /functions/v1/rate-limiter");
-    lines.push("Check rate limit before processing a request.", "");
-    lines.push("Body: `{ endpoint, user_id?, ip_address? }`", "");
-    lines.push("Returns `{ allowed, remaining }` or `429` with `Retry-After` header.", "");
+    lines.push("Check rate limit. Body: `{ endpoint, user_id?, ip_address? }`", "");
   }
 
   if (config.features.backgroundJobs) {
     lines.push("## Job Worker", "");
     lines.push("### POST /functions/v1/job-worker");
-    lines.push("Claims and processes the next pending job.", "");
-    lines.push("Body: `{ job_type? }` — optional filter by job type.", "");
+    lines.push("Claims and processes the next pending job. Body: `{ job_type? }`", "");
   }
 
   if (config.features.logging) {
     lines.push("## API Logger", "");
     lines.push("### POST /functions/v1/api-logger");
-    lines.push("Log API metrics, activity, or errors.", "");
-    lines.push("Body: `{ endpoint?, status_code?, duration_ms?, action?, error_type?, message? }`", "");
+    lines.push("Log API metrics/activity/errors. Body: `{ endpoint?, status_code?, action?, error_type? }`", "");
   }
 
   return lines.join("\n");
@@ -2034,7 +2106,6 @@ Each module is independent and generates its own:
 - RLS policies (secure by default)
 - Helper functions (SECURITY DEFINER where needed)
 - Edge functions (where applicable)
-- Documentation entries
 
 ## Enabled Modules
 
@@ -2043,20 +2114,21 @@ ${modules.join("\n")}
 ## Migration Order
 
 \`\`\`
-migrations/001_core.sql          — Tables, indexes, constraints
-migrations/002_roles.sql         — Role enum, user_roles table, has_role()
-migrations/003_rls.sql           — Per-role RLS policies
+migrations/001_core.sql          — Tables, indexes, constraints${config.features.multiTenancy ? ' (+ organizations)' : ''}
+migrations/002_roles.sql         — Role enum, user_roles table, has_role(), bootstrap policy
+migrations/003_rls.sql           — Per-role RLS policies + owner-based baseline policies
 migrations/004_*.sql             — Optional module migrations
-seed.sql                         — Sample data
+seed.sql                         — Sample data + admin bootstrap instructions
 \`\`\`
 
 ## Security Model
 
 1. **Deny by default**: All tables have RLS enabled. No access without explicit policies.
-2. **Role separation**: Roles stored in \`user_roles\` table (not on profiles).
-3. **No recursion**: \`has_role()\` uses SECURITY DEFINER to prevent RLS recursion.
-4. **Tenant isolation**: Multi-tenancy uses \`is_tenant_member()\` for org-scoped access.
-5. **Service role**: Edge functions use service role for privileged operations only.
+2. **Owner-based baseline**: Users can always CRUD their own records (via \`user_id\`).
+3. **Role separation**: Roles stored in \`user_roles\` table (not on profiles).
+4. **Bootstrap policy**: First user can self-assign admin when no admins exist.
+5. **No recursion**: \`has_role()\` uses SECURITY DEFINER to prevent RLS recursion.
+6. **Tenant isolation**: Multi-tenancy uses \`is_tenant_member()\` for org-scoped access.
 `;
 }
 
