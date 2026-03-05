@@ -1915,10 +1915,14 @@ ${dashLinks}
         return ` ${c.name}: ''`;
       }).join(',')}}`;
 
+      // Determine ordering column
+      const orderCol = config.features.timestamps ? 'created_at' : (table.columns.find(c => c.isPrimary)?.name || 'id');
+
       files.push({
         path: `frontend/src/pages/${capitalize(table.name)}List.tsx`,
         content: `import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import Nav from '../components/Nav';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
 ${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
@@ -1935,7 +1939,7 @@ ${hasRoles ? "  const { isAdmin } = useUserRole();" : ""}
   const fetchItems = async () => {
     setLoading(true);
     let query = supabase.from('${table.name}').select('*');${orgFilter}
-    const { data } = await query.order('created_at', { ascending: false });
+    const { data } = await query.order('${orderCol}', { ascending: false });
     setItems(data || []);
     setLoading(false);
   };
