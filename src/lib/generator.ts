@@ -1547,6 +1547,102 @@ VITE_SUPABASE_ANON_KEY=your-anon-key-here`,
     category: "frontend",
   });
 
+  // ── useAuth hook ──────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/hooks/useAuth.ts",
+    content: `import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+import type { User, Session } from '@supabase/supabase-js';
+
+export function useAuth() {
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    window.location.href = '/login';
+  };
+
+  return { user, session, loading, signOut };
+}`,
+    category: "frontend",
+  });
+
+  // ── RequireAuth component ─────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/components/RequireAuth.tsx",
+    content: `import { useEffect } from 'react';
+import { useAuth } from '../hooks/useAuth';
+
+export default function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+
+  useEffect(() => {
+    if (!loading && !user) {
+      window.location.href = '/login';
+    }
+  }, [user, loading]);
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><p>Loading…</p></div>;
+  if (!user) return null;
+  return <>{children}</>;
+}`,
+    category: "frontend",
+  });
+
+  // ── Nav component ─────────────────────────────────────────────────────────
+  const navLinks = config.tables.map(t => 
+    `        <a href="/${t.name}" className={cn("px-3 py-1.5 rounded text-sm font-medium", path === "/${t.name}" ? "bg-blue-100 text-blue-800" : "text-gray-600 hover:text-gray-900 hover:bg-gray-100")}>${capitalize(t.name)}</a>`
+  ).join("\n");
+
+  files.push({
+    path: "frontend/src/components/Nav.tsx",
+    content: `import { useAuth } from '../hooks/useAuth';
+${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
+
+function cn(...classes: (string | false | undefined)[]) { return classes.filter(Boolean).join(' '); }
+
+export default function Nav() {
+  const { user, signOut } = useAuth();
+${hasRoles ? "  const { role } = useUserRole();" : ""}
+  const path = window.location.pathname;
+
+  if (!user) return null;
+
+  return (
+    <nav className="bg-white shadow-sm border-b px-4 h-14 flex items-center justify-between">
+      <div className="flex items-center gap-1">
+        <a href="/" className={cn("px-3 py-1.5 rounded text-sm font-medium", path === "/" ? "bg-blue-100 text-blue-800" : "text-gray-600 hover:text-gray-900 hover:bg-gray-100")}>Dashboard</a>
+${navLinks}
+      </div>
+      <div className="flex items-center gap-3">
+${hasRoles ? `        {role && <span className="text-xs font-semibold px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full uppercase">{role}</span>}` : ""}
+        <span className="text-sm text-gray-500">{user.email}</span>
+        <button onClick={signOut} className="text-sm text-red-600 hover:underline">Sign Out</button>
+      </div>
+    </nav>
+  );
+}`,
+    category: "frontend",
+  });
+
   // ── useOrganization hook (multi-tenancy only) ──────────────────────────────
   if (hasMT) {
     files.push({
@@ -1625,6 +1721,7 @@ export function useUserRole() {
   files.push({
     path: "frontend/src/App.tsx",
     content: `import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import RequireAuth from './components/RequireAuth';
 ${config.frontendOptions.loginSignup ? "import Login from './pages/Login';\nimport Signup from './pages/Signup';" : ""}
 ${config.frontendOptions.roleDashboards ? "import Dashboard from './pages/Dashboard';" : ""}
 ${config.frontendOptions.crudPages ? config.tables.map((t) => `import ${capitalize(t.name)}List from './pages/${capitalize(t.name)}List';`).join("\n") : ""}
@@ -1633,9 +1730,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div className=\"p-8\"><h1 className=\"text-2xl font-bold\">Home</h1></div>"}} />
 ${config.frontendOptions.loginSignup ? '        <Route path="/login" element={<Login />} />\n        <Route path="/signup" element={<Signup />} />' : ""}
-${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route path="/${t.name}" element={<${capitalize(t.name)}List />} />`).join("\n") : ""}
+        <Route path="/" element={<RequireAuth>${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div className=\"p-8\"><h1 className=\"text-2xl font-bold\">Home</h1></div>"}</RequireAuth>} />
+${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route path="/${t.name}" element={<RequireAuth><${capitalize(t.name)}List /></RequireAuth>} />`).join("\n") : ""}
       </Routes>
     </BrowserRouter>
   );
