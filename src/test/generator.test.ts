@@ -619,10 +619,11 @@ describe("generateProject — optional modules", () => {
     const files = generateProject(config);
     const sqlPaths = files.filter((f) => f.category === "sql").map((f) => f.path);
 
-    // Should only have core + seed
+    // Should have core + rls + seed
     expect(sqlPaths).toContain("migrations/001_core.sql");
+    expect(sqlPaths).toContain("migrations/002_rls.sql");
     expect(sqlPaths).toContain("seed.sql");
-    expect(sqlPaths.length).toBe(2);
+    expect(sqlPaths.length).toBe(3);
   });
 });
 
