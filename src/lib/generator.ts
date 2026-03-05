@@ -1284,7 +1284,9 @@ function generateSeed(config: ProjectConfig): string {
         default: return "NULL";
       }
     }).join(", ");
-    lines.push(`INSERT INTO public.${table.name} (${colNames}) VALUES (${sampleValues});`);
+    // Comment out because user_id / organization_id are required at runtime
+    lines.push(`-- INSERT INTO public.${table.name} (${colNames}) VALUES (${sampleValues});`);
+    lines.push(`-- NOTE: user_id${config.features.multiTenancy ? ' and organization_id are' : ' is'} required. Run inserts after signing up.`);
   }
   return lines.join("\n");
 }
