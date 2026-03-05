@@ -1984,10 +1984,12 @@ ${hasRoles ? "  const { isAdmin } = useUserRole();" : ""}
     setError('');
   };
 
-  if (loading) return <div className="p-8">Loading…</div>;
+  if (loading) return <div><Nav /><div className="p-8">Loading…</div></div>;
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
+    <div>
+      <Nav />
+      <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">${capitalize(table.name)}</h1>
         <div className="flex gap-2">
