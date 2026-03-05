@@ -27,8 +27,10 @@ export function generateProject(config: ProjectConfig): GeneratedFile[] {
   // 2. Roles setup (if roles defined)
   if (config.roles.length > 0) {
     files.push({ path: "migrations/002_roles.sql", content: generateRolesSetup(config), category: "sql" });
-    files.push({ path: "migrations/003_rls.sql", content: generateRLS(config), category: "sql" });
   }
+
+  // 3. RLS policies — ALWAYS generated (owner-based baseline + role-based if roles exist)
+  files.push({ path: `migrations/${config.roles.length > 0 ? '003' : '002'}_rls.sql`, content: generateRLS(config), category: "sql" });
 
   // 3. Optional modules — each gets its own numbered migration
   let migrationIdx = 4;
