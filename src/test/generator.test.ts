@@ -52,10 +52,11 @@ describe("generateProject — orchestrator", () => {
     expect(findFile(files, ".env.example")).toBeDefined();
   });
 
-  it("does NOT generate roles/rls migrations when no roles are defined", () => {
+  it("does NOT generate roles migration when no roles are defined, but still generates RLS", () => {
     const files = generateProject(makeConfig({ roles: [] }));
     expect(findFile(files, "002_roles.sql")).toBeUndefined();
-    expect(findFile(files, "003_rls.sql")).toBeUndefined();
+    // RLS is always generated (owner-based baseline)
+    expect(findFile(files, "002_rls.sql")).toBeDefined();
   });
 
   it("generates roles + rls migrations when roles are defined", () => {
@@ -619,10 +620,11 @@ describe("generateProject — optional modules", () => {
     const files = generateProject(config);
     const sqlPaths = files.filter((f) => f.category === "sql").map((f) => f.path);
 
-    // Should only have core + seed
+    // Should have core + rls + seed
     expect(sqlPaths).toContain("migrations/001_core.sql");
+    expect(sqlPaths).toContain("migrations/002_rls.sql");
     expect(sqlPaths).toContain("seed.sql");
-    expect(sqlPaths.length).toBe(2);
+    expect(sqlPaths.length).toBe(3);
   });
 });
 

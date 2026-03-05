@@ -27,8 +27,10 @@ export function generateProject(config: ProjectConfig): GeneratedFile[] {
   // 2. Roles setup (if roles defined)
   if (config.roles.length > 0) {
     files.push({ path: "migrations/002_roles.sql", content: generateRolesSetup(config), category: "sql" });
-    files.push({ path: "migrations/003_rls.sql", content: generateRLS(config), category: "sql" });
   }
+
+  // 3. RLS policies — ALWAYS generated (owner-based baseline + role-based if roles exist)
+  files.push({ path: `migrations/${config.roles.length > 0 ? '003' : '002'}_rls.sql`, content: generateRLS(config), category: "sql" });
 
   // 3. Optional modules — each gets its own numbered migration
   let migrationIdx = 4;
@@ -345,54 +347,59 @@ function generateRLS(config: ProjectConfig): string {
   const lines: string[] = [
     "-- ============================================================",
     "-- Row Level Security Policies",
-    "-- SECURITY: Each policy uses the has_role() security definer",
-    "-- function to avoid recursive RLS evaluation.",
     "-- ============================================================",
     "",
   ];
 
-  // ── Role-based policies ────────────────────────────────────────────────────
-  for (const role of config.roles) {
-    if (!role.name) continue;
-    for (const table of config.tables) {
-      if (!table.name) continue;
-      const perms = role.permissions[table.name];
-      if (!perms) continue;
+  const hasRoles = config.roles.length > 0;
 
-      const tenantClause = config.features.multiTenancy
-        ? " OR public.is_tenant_member(organization_id)"
-        : "";
+  // ── Role-based policies (only if roles exist) ─────────────────────────────
+  if (hasRoles) {
+    lines.push("-- ── Role-based policies ──────────────────────────────────────");
+    lines.push("-- Uses has_role() security definer function to avoid recursive RLS.");
+    lines.push("");
 
-      if (perms.select) {
-        lines.push(`CREATE POLICY "${role.name}_select_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.insert) {
-        lines.push(`CREATE POLICY "${role.name}_insert_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
-        lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.update) {
-        lines.push(`CREATE POLICY "${role.name}_update_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.delete) {
-        lines.push(`CREATE POLICY "${role.name}_delete_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
+    for (const role of config.roles) {
+      if (!role.name) continue;
+      for (const table of config.tables) {
+        if (!table.name) continue;
+        const perms = role.permissions[table.name];
+        if (!perms) continue;
+
+        const tenantClause = config.features.multiTenancy
+          ? " OR public.is_tenant_member(organization_id)"
+          : "";
+
+        if (perms.select) {
+          lines.push(`CREATE POLICY "${role.name}_select_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.insert) {
+          lines.push(`CREATE POLICY "${role.name}_insert_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
+          lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.update) {
+          lines.push(`CREATE POLICY "${role.name}_update_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.delete) {
+          lines.push(`CREATE POLICY "${role.name}_delete_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
       }
     }
   }
 
   // ── Owner-based baseline policies ──────────────────────────────────────────
   // These ensure authenticated users can always manage their OWN records
-  // even if they don't have a role assigned yet.
   lines.push("-- ── Owner-based baseline policies ────────────────────────────");
   lines.push("-- Ensures users can always manage their own records (via user_id).");
   lines.push("");
@@ -421,6 +428,19 @@ function generateRLS(config: ProjectConfig): string {
     lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
     lines.push(`  USING (auth.uid() = user_id);`);
     lines.push("");
+  }
+
+  // ── Multi-tenancy RLS for user tables (if no roles) ────────────────────────
+  if (config.features.multiTenancy && !hasRoles) {
+    lines.push("-- ── Tenant-scoped policies ───────────────────────────────────");
+    lines.push("");
+    for (const table of config.tables) {
+      if (!table.name) continue;
+      lines.push(`CREATE POLICY "tenant_select_${table.name}"`);
+      lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
+      lines.push(`  USING (public.is_tenant_member(organization_id));`);
+      lines.push("");
+    }
   }
 
   return lines.join("\n");
@@ -1264,7 +1284,9 @@ function generateSeed(config: ProjectConfig): string {
         default: return "NULL";
       }
     }).join(", ");
-    lines.push(`INSERT INTO public.${table.name} (${colNames}) VALUES (${sampleValues});`);
+    // Comment out because user_id / organization_id are required at runtime
+    lines.push(`-- INSERT INTO public.${table.name} (${colNames}) VALUES (${sampleValues});`);
+    lines.push(`-- NOTE: user_id${config.features.multiTenancy ? ' and organization_id are' : ' is'} required. Run inserts after signing up.`);
   }
   return lines.join("\n");
 }
@@ -1525,6 +1547,102 @@ VITE_SUPABASE_ANON_KEY=your-anon-key-here`,
     category: "frontend",
   });
 
+  // ── useAuth hook ──────────────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/hooks/useAuth.ts",
+    content: `import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+import type { User, Session } from '@supabase/supabase-js';
+
+export function useAuth() {
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    window.location.href = '/login';
+  };
+
+  return { user, session, loading, signOut };
+}`,
+    category: "frontend",
+  });
+
+  // ── RequireAuth component ─────────────────────────────────────────────────
+  files.push({
+    path: "frontend/src/components/RequireAuth.tsx",
+    content: `import { useEffect } from 'react';
+import { useAuth } from '../hooks/useAuth';
+
+export default function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+
+  useEffect(() => {
+    if (!loading && !user) {
+      window.location.href = '/login';
+    }
+  }, [user, loading]);
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><p>Loading…</p></div>;
+  if (!user) return null;
+  return <>{children}</>;
+}`,
+    category: "frontend",
+  });
+
+  // ── Nav component ─────────────────────────────────────────────────────────
+  const navLinks = config.tables.map(t => 
+    `        <a href="/${t.name}" className={cn("px-3 py-1.5 rounded text-sm font-medium", path === "/${t.name}" ? "bg-blue-100 text-blue-800" : "text-gray-600 hover:text-gray-900 hover:bg-gray-100")}>${capitalize(t.name)}</a>`
+  ).join("\n");
+
+  files.push({
+    path: "frontend/src/components/Nav.tsx",
+    content: `import { useAuth } from '../hooks/useAuth';
+${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
+
+function cn(...classes: (string | false | undefined)[]) { return classes.filter(Boolean).join(' '); }
+
+export default function Nav() {
+  const { user, signOut } = useAuth();
+${hasRoles ? "  const { role } = useUserRole();" : ""}
+  const path = window.location.pathname;
+
+  if (!user) return null;
+
+  return (
+    <nav className="bg-white shadow-sm border-b px-4 h-14 flex items-center justify-between">
+      <div className="flex items-center gap-1">
+        <a href="/" className={cn("px-3 py-1.5 rounded text-sm font-medium", path === "/" ? "bg-blue-100 text-blue-800" : "text-gray-600 hover:text-gray-900 hover:bg-gray-100")}>Dashboard</a>
+${navLinks}
+      </div>
+      <div className="flex items-center gap-3">
+${hasRoles ? `        {role && <span className="text-xs font-semibold px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full uppercase">{role}</span>}` : ""}
+        <span className="text-sm text-gray-500">{user.email}</span>
+        <button onClick={signOut} className="text-sm text-red-600 hover:underline">Sign Out</button>
+      </div>
+    </nav>
+  );
+}`,
+    category: "frontend",
+  });
+
   // ── useOrganization hook (multi-tenancy only) ──────────────────────────────
   if (hasMT) {
     files.push({
@@ -1603,6 +1721,7 @@ export function useUserRole() {
   files.push({
     path: "frontend/src/App.tsx",
     content: `import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import RequireAuth from './components/RequireAuth';
 ${config.frontendOptions.loginSignup ? "import Login from './pages/Login';\nimport Signup from './pages/Signup';" : ""}
 ${config.frontendOptions.roleDashboards ? "import Dashboard from './pages/Dashboard';" : ""}
 ${config.frontendOptions.crudPages ? config.tables.map((t) => `import ${capitalize(t.name)}List from './pages/${capitalize(t.name)}List';`).join("\n") : ""}
@@ -1611,9 +1730,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div className=\"p-8\"><h1 className=\"text-2xl font-bold\">Home</h1></div>"}} />
 ${config.frontendOptions.loginSignup ? '        <Route path="/login" element={<Login />} />\n        <Route path="/signup" element={<Signup />} />' : ""}
-${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route path="/${t.name}" element={<${capitalize(t.name)}List />} />`).join("\n") : ""}
+        <Route path="/" element={<RequireAuth>${config.frontendOptions.roleDashboards ? "<Dashboard />" : "<div className=\"p-8\"><h1 className=\"text-2xl font-bold\">Home</h1></div>"}</RequireAuth>} />
+${config.frontendOptions.crudPages ? config.tables.map((t) => `        <Route path="/${t.name}" element={<RequireAuth><${capitalize(t.name)}List /></RequireAuth>} />`).join("\n") : ""}
       </Routes>
     </BrowserRouter>
   );
@@ -1700,23 +1819,18 @@ export default function Signup() {
 
   // ── Dashboard.tsx ──────────────────────────────────────────────────────────
   if (config.frontendOptions.roleDashboards) {
-    const navLinks = config.tables.map(t => `          <a href="/${t.name}" className="px-4 py-2 bg-white rounded shadow hover:shadow-md transition text-blue-600 font-medium">${capitalize(t.name)}</a>`).join("\n");
+    const dashLinks = config.tables.map(t => `          <a href="/${t.name}" className="px-4 py-2 bg-white rounded shadow hover:shadow-md transition text-blue-600 font-medium">${capitalize(t.name)}</a>`).join("\n");
     files.push({
       path: "frontend/src/pages/Dashboard.tsx",
-      content: `import { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
+      content: `import { useState } from 'react';
+import Nav from '../components/Nav';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
 ${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
 export default function Dashboard() {
-  const [user, setUser] = useState<any>(null);
 ${hasMT ? "  const { orgId, loading: orgLoading } = useOrganization();" : ""}
 ${hasRoles ? "  const { role, isAdmin, bootstrapAdmin, loading: roleLoading } = useUserRole();" : ""}
 ${hasRoles ? "  const [bootstrapping, setBootstrapping] = useState(false);" : ""}
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUser(data.user));
-  }, []);
 
 ${hasRoles ? `  const handleBootstrap = async () => {
     setBootstrapping(true);
@@ -1727,14 +1841,7 @@ ${hasRoles ? `  const handleBootstrap = async () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow p-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold">${config.projectName || "Dashboard"}</h1>
-        <div className="flex items-center gap-4">
-${hasRoles ? `          {!roleLoading && role && <span className="text-xs font-semibold px-2 py-1 bg-blue-100 text-blue-800 rounded-full uppercase">{role}</span>}` : ""}
-          <span className="text-sm text-gray-600">{user?.email}</span>
-          <button onClick={() => supabase.auth.signOut().then(() => window.location.href = '/login')} className="text-sm text-red-600 hover:underline">Sign Out</button>
-        </div>
-      </nav>
+      <Nav />
       <main className="p-8 max-w-4xl mx-auto">
 ${hasMT ? `        {orgLoading ? <p>Loading…</p> : <p className="text-sm text-gray-500 mb-4">Organization: <code className="bg-gray-100 px-1 rounded">{orgId ?? 'None'}</code></p>}` : ""}
 
@@ -1763,7 +1870,7 @@ ${hasRoles ? `        {/* Admin Section */}
 
         <h2 className="text-lg font-semibold mb-4">Quick Links</h2>
         <div className="flex flex-wrap gap-4">
-${navLinks}
+${dashLinks}
         </div>
       </main>
     </div>
@@ -1808,10 +1915,14 @@ ${navLinks}
         return ` ${c.name}: ''`;
       }).join(',')}}`;
 
+      // Determine ordering column
+      const orderCol = config.features.timestamps ? 'created_at' : (table.columns.find(c => c.isPrimary)?.name || 'id');
+
       files.push({
         path: `frontend/src/pages/${capitalize(table.name)}List.tsx`,
         content: `import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import Nav from '../components/Nav';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
 ${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
@@ -1828,7 +1939,7 @@ ${hasRoles ? "  const { isAdmin } = useUserRole();" : ""}
   const fetchItems = async () => {
     setLoading(true);
     let query = supabase.from('${table.name}').select('*');${orgFilter}
-    const { data } = await query.order('created_at', { ascending: false });
+    const { data } = await query.order('${orderCol}', { ascending: false });
     setItems(data || []);
     setLoading(false);
   };
@@ -1873,10 +1984,12 @@ ${hasRoles ? "  const { isAdmin } = useUserRole();" : ""}
     setError('');
   };
 
-  if (loading) return <div className="p-8">Loading…</div>;
+  if (loading) return <div><Nav /><div className="p-8">Loading…</div></div>;
 
   return (
-    <div className="p-8 max-w-6xl mx-auto">
+    <div>
+      <Nav />
+      <div className="p-8 max-w-6xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">${capitalize(table.name)}</h1>
         <div className="flex gap-2">
@@ -1930,6 +2043,7 @@ ${cols.map(c => `                <td className="p-3 text-sm">{String(item.${c.na
           </tbody>
         </table>
       </div>
+    </div>
     </div>
   );
 }`,
