@@ -1819,23 +1819,18 @@ export default function Signup() {
 
   // ── Dashboard.tsx ──────────────────────────────────────────────────────────
   if (config.frontendOptions.roleDashboards) {
-    const navLinks = config.tables.map(t => `          <a href="/${t.name}" className="px-4 py-2 bg-white rounded shadow hover:shadow-md transition text-blue-600 font-medium">${capitalize(t.name)}</a>`).join("\n");
+    const dashLinks = config.tables.map(t => `          <a href="/${t.name}" className="px-4 py-2 bg-white rounded shadow hover:shadow-md transition text-blue-600 font-medium">${capitalize(t.name)}</a>`).join("\n");
     files.push({
       path: "frontend/src/pages/Dashboard.tsx",
-      content: `import { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
+      content: `import { useState } from 'react';
+import Nav from '../components/Nav';
 ${hasMT ? "import { useOrganization } from '../hooks/useOrganization';" : ""}
 ${hasRoles ? "import { useUserRole } from '../hooks/useUserRole';" : ""}
 
 export default function Dashboard() {
-  const [user, setUser] = useState<any>(null);
 ${hasMT ? "  const { orgId, loading: orgLoading } = useOrganization();" : ""}
 ${hasRoles ? "  const { role, isAdmin, bootstrapAdmin, loading: roleLoading } = useUserRole();" : ""}
 ${hasRoles ? "  const [bootstrapping, setBootstrapping] = useState(false);" : ""}
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUser(data.user));
-  }, []);
 
 ${hasRoles ? `  const handleBootstrap = async () => {
     setBootstrapping(true);
@@ -1846,14 +1841,7 @@ ${hasRoles ? `  const handleBootstrap = async () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow p-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold">${config.projectName || "Dashboard"}</h1>
-        <div className="flex items-center gap-4">
-${hasRoles ? `          {!roleLoading && role && <span className="text-xs font-semibold px-2 py-1 bg-blue-100 text-blue-800 rounded-full uppercase">{role}</span>}` : ""}
-          <span className="text-sm text-gray-600">{user?.email}</span>
-          <button onClick={() => supabase.auth.signOut().then(() => window.location.href = '/login')} className="text-sm text-red-600 hover:underline">Sign Out</button>
-        </div>
-      </nav>
+      <Nav />
       <main className="p-8 max-w-4xl mx-auto">
 ${hasMT ? `        {orgLoading ? <p>Loading…</p> : <p className="text-sm text-gray-500 mb-4">Organization: <code className="bg-gray-100 px-1 rounded">{orgId ?? 'None'}</code></p>}` : ""}
 
@@ -1882,7 +1870,7 @@ ${hasRoles ? `        {/* Admin Section */}
 
         <h2 className="text-lg font-semibold mb-4">Quick Links</h2>
         <div className="flex flex-wrap gap-4">
-${navLinks}
+${dashLinks}
         </div>
       </main>
     </div>
