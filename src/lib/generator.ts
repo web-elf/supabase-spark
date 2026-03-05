@@ -2044,6 +2044,7 @@ ${cols.map(c => `                <td className="p-3 text-sm">{String(item.${c.na
         </table>
       </div>
     </div>
+    </div>
   );
 }`,
         category: "frontend",
