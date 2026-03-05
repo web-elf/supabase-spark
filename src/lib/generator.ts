@@ -347,54 +347,59 @@ function generateRLS(config: ProjectConfig): string {
   const lines: string[] = [
     "-- ============================================================",
     "-- Row Level Security Policies",
-    "-- SECURITY: Each policy uses the has_role() security definer",
-    "-- function to avoid recursive RLS evaluation.",
     "-- ============================================================",
     "",
   ];
 
-  // ── Role-based policies ────────────────────────────────────────────────────
-  for (const role of config.roles) {
-    if (!role.name) continue;
-    for (const table of config.tables) {
-      if (!table.name) continue;
-      const perms = role.permissions[table.name];
-      if (!perms) continue;
+  const hasRoles = config.roles.length > 0;
 
-      const tenantClause = config.features.multiTenancy
-        ? " OR public.is_tenant_member(organization_id)"
-        : "";
+  // ── Role-based policies (only if roles exist) ─────────────────────────────
+  if (hasRoles) {
+    lines.push("-- ── Role-based policies ──────────────────────────────────────");
+    lines.push("-- Uses has_role() security definer function to avoid recursive RLS.");
+    lines.push("");
 
-      if (perms.select) {
-        lines.push(`CREATE POLICY "${role.name}_select_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.insert) {
-        lines.push(`CREATE POLICY "${role.name}_insert_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
-        lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.update) {
-        lines.push(`CREATE POLICY "${role.name}_update_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
-      }
-      if (perms.delete) {
-        lines.push(`CREATE POLICY "${role.name}_delete_${table.name}"`);
-        lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
-        lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
-        lines.push("");
+    for (const role of config.roles) {
+      if (!role.name) continue;
+      for (const table of config.tables) {
+        if (!table.name) continue;
+        const perms = role.permissions[table.name];
+        if (!perms) continue;
+
+        const tenantClause = config.features.multiTenancy
+          ? " OR public.is_tenant_member(organization_id)"
+          : "";
+
+        if (perms.select) {
+          lines.push(`CREATE POLICY "${role.name}_select_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.insert) {
+          lines.push(`CREATE POLICY "${role.name}_insert_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR INSERT TO authenticated`);
+          lines.push(`  WITH CHECK (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.update) {
+          lines.push(`CREATE POLICY "${role.name}_update_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR UPDATE TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
+        if (perms.delete) {
+          lines.push(`CREATE POLICY "${role.name}_delete_${table.name}"`);
+          lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
+          lines.push(`  USING (public.has_role(auth.uid(), '${role.name}')${tenantClause});`);
+          lines.push("");
+        }
       }
     }
   }
 
   // ── Owner-based baseline policies ──────────────────────────────────────────
   // These ensure authenticated users can always manage their OWN records
-  // even if they don't have a role assigned yet.
   lines.push("-- ── Owner-based baseline policies ────────────────────────────");
   lines.push("-- Ensures users can always manage their own records (via user_id).");
   lines.push("");
@@ -423,6 +428,19 @@ function generateRLS(config: ProjectConfig): string {
     lines.push(`  ON public.${table.name} FOR DELETE TO authenticated`);
     lines.push(`  USING (auth.uid() = user_id);`);
     lines.push("");
+  }
+
+  // ── Multi-tenancy RLS for user tables (if no roles) ────────────────────────
+  if (config.features.multiTenancy && !hasRoles) {
+    lines.push("-- ── Tenant-scoped policies ───────────────────────────────────");
+    lines.push("");
+    for (const table of config.tables) {
+      if (!table.name) continue;
+      lines.push(`CREATE POLICY "tenant_select_${table.name}"`);
+      lines.push(`  ON public.${table.name} FOR SELECT TO authenticated`);
+      lines.push(`  USING (public.is_tenant_member(organization_id));`);
+      lines.push("");
+    }
   }
 
   return lines.join("\n");
